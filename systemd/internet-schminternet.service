@@ -1,0 +1,19 @@
+[Unit]
+Description=Internet Schminternet — Connection Health Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Adjust WorkingDirectory and ExecStart to match your installation path
+WorkingDirectory=/opt/internet-schminternet
+ExecStart=/opt/internet-schminternet/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schminternet
+
+[Install]
+WantedBy=multi-user.target
