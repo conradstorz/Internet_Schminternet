@@ -183,6 +183,23 @@ async def get_pending_alerts() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def delete_queued_alert(alert_id: int) -> None:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute("DELETE FROM alert_queue WHERE id = ?", (alert_id,))
+        await db.commit()
+
+
+async def update_alert_attempt(alert_id: int) -> None:
+    last_attempt = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "UPDATE alert_queue SET attempt_count = attempt_count + 1, "
+            "last_attempt_at = ? WHERE id = ?",
+            (last_attempt, alert_id),
+        )
+        await db.commit()
+
+
 async def cleanup_old(days: int = 30) -> None:
     async with aiosqlite.connect(_DB_PATH) as db:
         await db.execute(

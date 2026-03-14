@@ -126,3 +126,40 @@ async def test_get_pending_alerts_ordered_oldest_first():
     assert rows[0]["id"] < rows[1]["id"]
     assert rows[0]["subject"] == "first"
     assert rows[1]["subject"] == "second"
+
+
+async def test_delete_queued_alert_removes_row():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "subject", "body")
+    rows = await db.get_pending_alerts()
+    await db.delete_queued_alert(rows[0]["id"])
+    assert await db.get_pending_alerts() == []
+
+
+async def test_delete_queued_alert_missing_row_does_not_raise():
+    await db.init_db()
+    await db.delete_queued_alert(9999)  # no such row — must be a silent no-op
+
+
+async def test_update_alert_attempt_increments_count():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "subject", "body")
+    rows = await db.get_pending_alerts()
+    await db.update_alert_attempt(rows[0]["id"])
+    rows = await db.get_pending_alerts()
+    assert rows[0]["attempt_count"] == 1
+    assert rows[0]["last_attempt_at"] is not None
+
+
+async def test_update_alert_attempt_accumulates():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "subject", "body")
+    rows = await db.get_pending_alerts()
+    row_id = rows[0]["id"]
+    await db.update_alert_attempt(row_id)
+    await db.update_alert_attempt(row_id)
+    rows = await db.get_pending_alerts()
+    assert rows[0]["attempt_count"] == 2
