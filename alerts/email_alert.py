@@ -54,6 +54,12 @@ class EmailAlerter:
         else:
             await db.enqueue_alert(created_at, subject, body)
 
+    async def send_best_effort(self, subject: str, body: str) -> bool:
+        """Send an email without cooldown or queueing. Returns True on success."""
+        if not self._enabled():
+            return False
+        return await self._send(subject, body)
+
     async def flush_alert_queue(self) -> None:
         """Attempt to deliver all queued alerts. Safe to call at any time."""
         if not self._enabled():

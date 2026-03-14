@@ -19,8 +19,7 @@ def isolated_db(tmp_path):
 def _alerter(enabled: bool = False) -> MagicMock:
     """Return a mock EmailAlerter. Disabled by default (no real SMTP)."""
     alerter = MagicMock()
-    alerter._enabled = MagicMock(return_value=enabled)
-    alerter._send = AsyncMock(return_value=True)
+    alerter.send_best_effort = AsyncMock(return_value=enabled)
     alerter.flush_alert_queue = AsyncMock()
     return alerter
 
@@ -33,7 +32,7 @@ async def test_first_run_writes_event_and_sends_no_email():
     assert len(events) == 1
     assert events[0]["event_type"] == "startup"
     assert events[0]["description"] == "First run."
-    alerter._send.assert_not_called()
+    alerter.send_best_effort.assert_not_called()
 
 
 async def test_clean_shutdown_calculates_downtime():
@@ -48,7 +47,7 @@ async def test_clean_shutdown_calculates_downtime():
 
     events = await db.get_events()
     assert "Clean" in events[0]["description"]
-    assert "32m" in events[0]["description"] or "32 m" in events[0]["description"]
+    assert "32m 35s" in events[0]["description"]
 
 
 async def test_unclean_shutdown_uses_last_seen_at():
@@ -63,7 +62,7 @@ async def test_unclean_shutdown_uses_last_seen_at():
 
     events = await db.get_events()
     assert "Unclean" in events[0]["description"]
-    assert "15m" in events[0]["description"] or "15 m" in events[0]["description"]
+    assert "15m 0s" in events[0]["description"]
 
 
 async def test_empty_string_shutdown_at_treated_as_unclean():
@@ -119,8 +118,8 @@ async def test_startup_email_includes_queued_count():
     await _startup_sequence(alerter, now=now)
 
     # Verify the startup email body mentions 2 queued alerts
-    call_args = alerter._send.call_args
-    body = call_args[0][1]  # second positional arg to _send
+    call_args = alerter.send_best_effort.call_args
+    body = call_args[0][1]  # second positional arg to send_best_effort
     assert "2 alert" in body
 
 
@@ -133,7 +132,7 @@ async def test_startup_email_omits_queued_sentence_when_none():
     alerter = _alerter(enabled=True)
     await _startup_sequence(alerter, now=now)
 
-    call_args = alerter._send.call_args
+    call_args = alerter.send_best_effort.call_args
     body = call_args[0][1]
     assert "alert" not in body.lower()
 

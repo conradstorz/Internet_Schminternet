@@ -60,25 +60,25 @@ async def _startup_sequence(
         now = datetime.now(timezone.utc)
     startup_ts = now.isoformat(timespec="seconds")
 
-    shutdown_at  = await db.get_state("shutdown_at")  or ""
+    shutdown_at = await db.get_state("shutdown_at") or ""
     last_seen_at = await db.get_state("last_seen_at") or ""
 
     # Classify
     if shutdown_at:
         shutdown_type = "clean"
-        reference_ts  = shutdown_at
+        reference_ts = shutdown_at
     elif last_seen_at:
         shutdown_type = "unclean"
-        reference_ts  = last_seen_at
+        reference_ts = last_seen_at
     else:
         shutdown_type = "first_run"
-        reference_ts  = None
+        reference_ts = None
 
     # Format downtime
     downtime_str = ""
     if reference_ts:
-        ref_dt   = datetime.fromisoformat(reference_ts)
-        total_s  = max(0, int((now - ref_dt).total_seconds()))
+        ref_dt = datetime.fromisoformat(reference_ts)
+        total_s = max(0, int((now - ref_dt).total_seconds()))
         hours, remainder = divmod(total_s, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours:
@@ -110,25 +110,24 @@ async def _startup_sequence(
         return
 
     # Count pending alerts before flush (for email body accuracy)
-    pending      = await db.get_pending_alerts()
+    pending = await db.get_pending_alerts()
     queued_count = len(pending)
 
     # Send startup email (best-effort — not queued on failure)
-    if alerter._enabled():
-        shutdown_label = (
-            "Clean shutdown"
-            if shutdown_type == "clean"
-            else "Unclean (power loss or crash)"
-        )
-        body = (
-            f"Service restarted at:  {startup_ts} UTC\n"
-            f"Last seen at:          {reference_ts} UTC\n"
-            f"Shutdown type:         {shutdown_label}\n"
-            f"Downtime (approx):     {downtime_str}\n"
-        )
-        if queued_count > 0:
-            body += f"\n{queued_count} alert(s) were queued during the outage and will follow this email.\n"
-        await alerter._send("[Schminternet] Service restarted", body)
+    shutdown_label = (
+        "Clean shutdown"
+        if shutdown_type == "clean"
+        else "Unclean (power loss or crash)"
+    )
+    body = (
+        f"Service restarted at:  {startup_ts} UTC\n"
+        f"Last seen at:          {reference_ts} UTC\n"
+        f"Shutdown type:         {shutdown_label}\n"
+        f"Downtime (approx):     {downtime_str}\n"
+    )
+    if queued_count > 0:
+        body += f"\n{queued_count} alert(s) were queued during the outage and will follow this email.\n"
+    await alerter.send_best_effort("[Schminternet] Service restarted", body)
 
     # Flush queued alerts
     await alerter.flush_alert_queue()
