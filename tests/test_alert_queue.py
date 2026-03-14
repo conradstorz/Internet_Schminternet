@@ -156,12 +156,19 @@ async def test_flush_skips_cooldown_checks():
 
 
 async def test_flush_idempotent_delete_does_not_raise():
-    """delete_queued_alert on an already-deleted row must be silent."""
+    """delete_queued_alert on an already-deleted row must be silent.
+
+    Simulates the race where flush reads a row, SMTP succeeds, but the row
+    was already deleted by a concurrent flush before delete_queued_alert runs.
+    """
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     await db.enqueue_alert(ts, "subject", "body")
-    rows = await db.get_pending_alerts()
-    # Pre-delete the row so flush finds it gone
-    await db.delete_queued_alert(rows[0]["id"])
-    with patch("smtplib.SMTP", return_value=_smtp_success()):
-        await alerter.flush_alert_queue()  # must not raise
+    stale_rows = await db.get_pending_alerts()
+    # Delete the row from the DB now so it's gone by the time flush tries to delete it
+    await db.delete_queued_alert(stale_rows[0]["id"])
+    # Patch get_pending_alerts to return the stale row so flush actually reaches
+    # the delete path, even though the underlying DB row is already gone
+    with patch("storage.db.get_pending_alerts", return_value=stale_rows):
+        with patch("smtplib.SMTP", return_value=_smtp_success()):
+            await alerter.flush_alert_queue()  # must not raise
