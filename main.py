@@ -263,12 +263,21 @@ async def main() -> None:
         await db.cleanup_old(retention)
         logger.info("Retention cleanup complete (kept last %d days)", retention)
 
+    async def job_heartbeat() -> None:
+        await db.set_state("last_seen_at", datetime.now(timezone.utc).isoformat())
+
+    async def job_flush_alerts() -> None:
+        if _alerter:
+            await _alerter.flush_alert_queue()
+
     scheduler.add_job(job_ping,      "interval", seconds=ping_cfg.get("interval_seconds", 30),    id="ping",      misfire_grace_time=15)
     scheduler.add_job(job_dns,       "interval", seconds=dns_cfg.get("interval_seconds", 60),     id="dns",       misfire_grace_time=30)
     scheduler.add_job(job_speedtest, "interval", seconds=speed_cfg.get("interval_seconds", 1800), id="speedtest", misfire_grace_time=60)
     scheduler.add_job(job_http,      "interval", seconds=http_cfg.get("interval_seconds", 120),   id="http",      misfire_grace_time=30)
     scheduler.add_job(job_ip,        "interval", seconds=ip_cfg.get("interval_seconds", 300),     id="ip",        misfire_grace_time=60)
     scheduler.add_job(job_cleanup,   "cron",     hour=3,                                           id="cleanup")
+    scheduler.add_job(job_heartbeat,    "interval", seconds=60, id="heartbeat")
+    scheduler.add_job(job_flush_alerts, "interval", minutes=5,  id="alert_flush")
 
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
@@ -312,6 +321,7 @@ async def main() -> None:
 
     await stop_event.wait()
 
+    await db.set_state("shutdown_at", datetime.now(timezone.utc).isoformat())
     logger.info("Shutting down…")
     scheduler.shutdown(wait=False)
     server.should_exit = True
