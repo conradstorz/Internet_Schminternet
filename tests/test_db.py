@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import aiosqlite
 
 import storage.db as db
 from monitors.base import MonitorResult
@@ -163,3 +164,22 @@ async def test_update_alert_attempt_accumulates():
     await db.update_alert_attempt(row_id)
     rows = await db.get_pending_alerts()
     assert rows[0]["attempt_count"] == 2
+
+
+async def test_cleanup_old_prunes_alert_queue():
+    await db.init_db()
+    # Insert a row with a very old queued_at (simulate aged-out row)
+    async with aiosqlite.connect(db._DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO alert_queue (created_at, queued_at, subject, body) "
+            "VALUES (?,?,?,?)",
+            ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", "old", "old body"),
+        )
+        await conn.commit()
+    # Also insert a fresh row that should survive
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "fresh", "fresh body")
+    await db.cleanup_old(days=30)
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+    assert rows[0]["subject"] == "fresh"

@@ -210,5 +210,9 @@ async def cleanup_old(days: int = 30) -> None:
             "DELETE FROM events WHERE timestamp < datetime('now', ? || ' days')",
             (f"-{days}",),
         )
+        await db.execute(
+            "DELETE FROM alert_queue WHERE queued_at < datetime('now', ? || ' days')",
+            (f"-{days}",),
+        )
         await db.commit()
         await db.execute("VACUUM")
