@@ -167,7 +167,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
         ts = results[0].timestamp
         if new_status == "down" and previous != "down":
             desc = "; ".join(r.message for r in results if r.message) or "No detail"
-            await _alerter.send_alert(monitor_name, desc, new_status, previous)
+            await _alerter.send_alert(monitor_name, desc, new_status, previous, ts)
             await db.insert_event(
                 {
                     "timestamp": ts,
@@ -179,7 +179,8 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                 }
             )
         elif new_status == "ok" and previous == "down":
-            await _alerter.send_recovery(monitor_name, "Connection restored")
+            await _alerter.send_recovery(monitor_name, "Connection restored", ts)
+            await _alerter.flush_alert_queue()
             await db.insert_event(
                 {
                     "timestamp": ts,
@@ -224,6 +225,8 @@ async def main() -> None:
 
     # Alerter
     _alerter = EmailAlerter(config.get("alerts", {}).get("email", {}))
+
+    await _startup_sequence(_alerter)
 
     # Pull monitor config sections
     ping_cfg     = config["monitors"]["ping"]
