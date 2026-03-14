@@ -48,6 +48,96 @@ _alerter: Optional[EmailAlerter] = None
 
 
 # ---------------------------------------------------------------------------
+# Startup sequence
+# ---------------------------------------------------------------------------
+
+async def _startup_sequence(
+    alerter: "EmailAlerter",
+    now: Optional[datetime] = None,
+) -> None:
+    """Classify startup type, emit event, send startup email, flush queue."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    startup_ts = now.isoformat(timespec="seconds")
+
+    shutdown_at  = await db.get_state("shutdown_at")  or ""
+    last_seen_at = await db.get_state("last_seen_at") or ""
+
+    # Classify
+    if shutdown_at:
+        shutdown_type = "clean"
+        reference_ts  = shutdown_at
+    elif last_seen_at:
+        shutdown_type = "unclean"
+        reference_ts  = last_seen_at
+    else:
+        shutdown_type = "first_run"
+        reference_ts  = None
+
+    # Format downtime
+    downtime_str = ""
+    if reference_ts:
+        ref_dt   = datetime.fromisoformat(reference_ts)
+        total_s  = max(0, int((now - ref_dt).total_seconds()))
+        hours, remainder = divmod(total_s, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            downtime_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes:
+            downtime_str = f"{minutes}m {seconds}s"
+        else:
+            downtime_str = f"{seconds}s"
+
+    # Build event description
+    if shutdown_type == "first_run":
+        description = "First run."
+    elif shutdown_type == "clean":
+        description = f"Clean shutdown. Downtime: {downtime_str}"
+    else:
+        description = f"Unclean shutdown (power loss or crash). Downtime (approx): {downtime_str}"
+
+    await db.insert_event({
+        "timestamp": startup_ts,
+        "event_type": "startup",
+        "monitor": "system",
+        "description": description,
+        "previous_status": "",
+        "new_status": "unknown",
+    })
+    logger.info("Startup: %s", description)
+
+    if shutdown_type == "first_run":
+        return
+
+    # Count pending alerts before flush (for email body accuracy)
+    pending      = await db.get_pending_alerts()
+    queued_count = len(pending)
+
+    # Send startup email (best-effort — not queued on failure)
+    if alerter._enabled():
+        shutdown_label = (
+            "Clean shutdown"
+            if shutdown_type == "clean"
+            else "Unclean (power loss or crash)"
+        )
+        body = (
+            f"Service restarted at:  {startup_ts} UTC\n"
+            f"Last seen at:          {reference_ts} UTC\n"
+            f"Shutdown type:         {shutdown_label}\n"
+            f"Downtime (approx):     {downtime_str}\n"
+        )
+        if queued_count > 0:
+            body += f"\n{queued_count} alert(s) were queued during the outage and will follow this email.\n"
+        await alerter._send("[Schminternet] Service restarted", body)
+
+    # Flush queued alerts
+    await alerter.flush_alert_queue()
+
+    # Clear shutdown_at only (last_seen_at left for heartbeat to overwrite)
+    await db.set_state("shutdown_at", "")
+
+
+# ---------------------------------------------------------------------------
 # Monitor runner — called by every scheduler job
 # ---------------------------------------------------------------------------
 
@@ -78,7 +168,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
         ts = results[0].timestamp
         if new_status == "down" and previous != "down":
             desc = "; ".join(r.message for r in results if r.message) or "No detail"
-            _alerter.send_alert(monitor_name, desc, new_status, previous)
+            await _alerter.send_alert(monitor_name, desc, new_status, previous)
             await db.insert_event(
                 {
                     "timestamp": ts,
@@ -90,7 +180,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                 }
             )
         elif new_status == "ok" and previous == "down":
-            _alerter.send_recovery(monitor_name, "Connection restored")
+            await _alerter.send_recovery(monitor_name, "Connection restored")
             await db.insert_event(
                 {
                     "timestamp": ts,
@@ -211,7 +301,7 @@ async def main() -> None:
     # ---------------------------------------------------------------------------
 
     stop_event = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _handle_signal(*_: object) -> None:
         stop_event.set()
