@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS state (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS alert_queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL,
+    queued_at       TEXT NOT NULL,
+    last_attempt_at TEXT,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    subject         TEXT NOT NULL,
+    body            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alert_queue_queued_at ON alert_queue (queued_at);
 """
 
 
