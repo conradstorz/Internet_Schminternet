@@ -54,6 +54,29 @@ class EmailAlerter:
         else:
             await db.enqueue_alert(created_at, subject, body)
 
+    async def flush_alert_queue(self) -> None:
+        """Attempt to deliver all queued alerts. Safe to call at any time."""
+        if not self._enabled():
+            return
+        rows = await db.get_pending_alerts()
+        if not rows:
+            return
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for row in rows:
+            amended_body = (
+                row["body"]
+                + f"Queued at (UTC):   {row['queued_at']}\n"
+                + f"Delivered at (UTC): {now}\n"
+            )
+            sent = await self._send(row["subject"], amended_body)
+            if sent:
+                await db.delete_queued_alert(row["id"])
+                logger.info(
+                    "Delivered queued alert id=%d: %s", row["id"], row["subject"]
+                )
+            else:
+                await db.update_alert_attempt(row["id"])
+
     async def send_recovery(self, monitor: str, description: str, created_at: str) -> None:
         """Emit a 'monitor has RECOVERED' email and clear the cooldown."""
         if not self._enabled():
