@@ -123,5 +123,6 @@ async def test_get_pending_alerts_ordered_oldest_first():
     await db.enqueue_alert(ts, "first", "body1")
     await db.enqueue_alert(ts, "second", "body2")
     rows = await db.get_pending_alerts()
+    assert rows[0]["id"] < rows[1]["id"]
     assert rows[0]["subject"] == "first"
     assert rows[1]["subject"] == "second"

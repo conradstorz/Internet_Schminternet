@@ -157,6 +157,11 @@ async def set_state(key: str, value: str) -> None:
 
 
 async def enqueue_alert(created_at: str, subject: str, body: str) -> None:
+    """Insert a new row into alert_queue.
+
+    ``created_at`` is the original event timestamp (caller-supplied).
+    ``queued_at`` is set internally to the current UTC time (queue insertion time).
+    """
     queued_at = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(_DB_PATH) as db:
         await db.execute(
