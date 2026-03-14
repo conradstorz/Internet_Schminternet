@@ -12,8 +12,9 @@ from alerts.email_alert import EmailAlerter
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path):
+async def isolated_db(tmp_path):
     db.configure(str(tmp_path / "test.db"))
+    await db.init_db()
 
 
 def _cfg(**overrides) -> dict:
@@ -38,7 +39,6 @@ def _smtp_success():
 
 
 async def test_failed_send_alert_enqueues_row():
-    await db.init_db()
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError):
@@ -50,7 +50,6 @@ async def test_failed_send_alert_enqueues_row():
 
 
 async def test_failed_send_recovery_enqueues_row():
-    await db.init_db()
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError):
@@ -61,7 +60,6 @@ async def test_failed_send_recovery_enqueues_row():
 
 
 async def test_successful_send_does_not_enqueue():
-    await db.init_db()
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", return_value=_smtp_success()):
@@ -71,7 +69,6 @@ async def test_successful_send_does_not_enqueue():
 
 async def test_body_includes_event_time():
     """The rendered email body must include the original event timestamp."""
-    await db.init_db()
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError):
