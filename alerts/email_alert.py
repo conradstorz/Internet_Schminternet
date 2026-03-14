@@ -65,7 +65,7 @@ class EmailAlerter:
         for row in rows:
             amended_body = (
                 row["body"]
-                + f"Queued at (UTC):   {row['queued_at']}\n"
+                + f"Queued at (UTC):    {row['queued_at']}\n"
                 + f"Delivered at (UTC): {now}\n"
             )
             sent = await self._send(row["subject"], amended_body)
