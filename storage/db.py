@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
@@ -153,6 +154,28 @@ async def set_state(key: str, value: str) -> None:
             "INSERT OR REPLACE INTO state (key, value) VALUES (?,?)", (key, value)
         )
         await db.commit()
+
+
+async def enqueue_alert(created_at: str, subject: str, body: str) -> None:
+    queued_at = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO alert_queue (created_at, queued_at, subject, body) "
+            "VALUES (?,?,?,?)",
+            (created_at, queued_at, subject, body),
+        )
+        await db.commit()
+
+
+async def get_pending_alerts() -> list[dict]:
+    """Non-destructive read — returns all queued rows ordered oldest first."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM alert_queue ORDER BY id ASC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
 
 async def cleanup_old(days: int = 30) -> None:

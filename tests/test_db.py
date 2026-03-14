@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-import pytest_asyncio
 
 import storage.db as db
 from monitors.base import MonitorResult
@@ -17,7 +16,6 @@ def isolated_db(tmp_path):
     db.configure(str(tmp_path / "test.db"))
 
 
-@pytest.mark.asyncio
 async def test_init_creates_file(tmp_path):
     path = str(tmp_path / "new.db")
     db.configure(path)
@@ -26,7 +24,6 @@ async def test_init_creates_file(tmp_path):
     assert os.path.exists(path)
 
 
-@pytest.mark.asyncio
 async def test_insert_and_query_recent():
     await db.init_db()
     ts = datetime.now(timezone.utc).isoformat()
@@ -44,7 +41,6 @@ async def test_insert_and_query_recent():
     assert rows[0]["status"] == "ok"
 
 
-@pytest.mark.asyncio
 async def test_query_different_monitor_returns_empty():
     await db.init_db()
     ts = datetime.now(timezone.utc).isoformat()
@@ -56,7 +52,6 @@ async def test_query_different_monitor_returns_empty():
     assert rows == []
 
 
-@pytest.mark.asyncio
 async def test_get_current_status_groups_by_monitor_metric():
     await db.init_db()
     ts = datetime.now(timezone.utc).isoformat()
@@ -72,7 +67,6 @@ async def test_get_current_status_groups_by_monitor_metric():
     assert "packet_loss_pct" in metrics
 
 
-@pytest.mark.asyncio
 async def test_state_get_set():
     await db.init_db()
     assert await db.get_state("external_ip") is None
@@ -83,7 +77,6 @@ async def test_state_get_set():
     assert await db.get_state("external_ip") == "5.6.7.8"
 
 
-@pytest.mark.asyncio
 async def test_insert_and_get_events():
     await db.init_db()
     ts = datetime.now(timezone.utc).isoformat()
@@ -99,3 +92,36 @@ async def test_insert_and_get_events():
     assert len(events) == 1
     assert events[0]["monitor"] == "ping"
     assert events[0]["new_status"] == "down"
+
+
+async def test_enqueue_and_get_pending_alerts():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "Test subject", "Test body")
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+    assert rows[0]["created_at"] == ts
+    assert rows[0]["subject"] == "Test subject"
+    assert rows[0]["body"] == "Test body"
+    assert rows[0]["attempt_count"] == 0
+    assert rows[0]["queued_at"] is not None
+
+
+async def test_get_pending_alerts_is_non_destructive():
+    """Calling get_pending_alerts twice returns the same rows both times."""
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "subject", "body")
+    await db.get_pending_alerts()
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+
+
+async def test_get_pending_alerts_ordered_oldest_first():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.enqueue_alert(ts, "first", "body1")
+    await db.enqueue_alert(ts, "second", "body2")
+    rows = await db.get_pending_alerts()
+    assert rows[0]["subject"] == "first"
+    assert rows[1]["subject"] == "second"
