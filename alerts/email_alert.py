@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+import storage.db as db
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +25,13 @@ class EmailAlerter:
     # Public interface
     # ------------------------------------------------------------------
 
-    def send_alert(
+    async def send_alert(
         self,
         monitor: str,
         description: str,
         new_status: str,
         previous_status: str,
+        created_at: str,
     ) -> None:
         """Emit a 'monitor is DOWN' email, respecting the cooldown window."""
         if not self._enabled():
@@ -38,29 +42,34 @@ class EmailAlerter:
 
         subject = f"[Schminternet] {monitor.upper()} is {new_status.upper()}"
         body = (
-            f"Monitor:         {monitor}\n"
-            f"Previous status: {previous_status}\n"
-            f"Current status:  {new_status}\n"
-            f"Details:         {description}\n"
-            f"Time (UTC):      {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+            f"Monitor:          {monitor}\n"
+            f"Previous status:  {previous_status}\n"
+            f"Current status:   {new_status}\n"
+            f"Details:          {description}\n"
+            f"Event time (UTC): {created_at}\n"
         )
-        self._send(subject, body)
-        self._cooldowns[monitor] = datetime.now(timezone.utc)
+        sent = await self._send(subject, body)
+        if sent:
+            self._cooldowns[monitor] = datetime.now(timezone.utc)
+        else:
+            await db.enqueue_alert(created_at, subject, body)
 
-    def send_recovery(self, monitor: str, description: str) -> None:
+    async def send_recovery(self, monitor: str, description: str, created_at: str) -> None:
         """Emit a 'monitor has RECOVERED' email and clear the cooldown."""
         if not self._enabled():
             return
 
         subject = f"[Schminternet] {monitor.upper()} has RECOVERED"
         body = (
-            f"Monitor:    {monitor}\n"
-            f"Status:     OK (recovered)\n"
-            f"Details:    {description}\n"
-            f"Time (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+            f"Monitor:          {monitor}\n"
+            f"Status:           OK (recovered)\n"
+            f"Details:          {description}\n"
+            f"Event time (UTC): {created_at}\n"
         )
-        self._send(subject, body)
+        sent = await self._send(subject, body)
         self._cooldowns.pop(monitor, None)
+        if not sent:
+            await db.enqueue_alert(created_at, subject, body)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -76,13 +85,14 @@ class EmailAlerter:
         cooldown = timedelta(minutes=float(self._cfg.get("cooldown_minutes", 15)))
         return datetime.now(timezone.utc) - last < cooldown
 
-    def _send(self, subject: str, body: str) -> None:
+    async def _send(self, subject: str, body: str) -> bool:
+        """Send an email via SMTP in a thread executor. Returns True on success."""
         cfg = self._cfg
         required = ("smtp_host", "from_addr", "to_addrs", "username", "password")
         for key in required:
             if not cfg.get(key):
                 logger.warning("Email alert skipped — missing config key: %s", key)
-                return
+                return False
 
         msg = MIMEMultipart()
         msg["From"] = cfg["from_addr"]
@@ -90,12 +100,18 @@ class EmailAlerter:
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
-        try:
+        def _smtp_send() -> None:
             with smtplib.SMTP(cfg["smtp_host"], int(cfg.get("smtp_port", 587))) as server:
                 if cfg.get("use_tls", True):
                     server.starttls()
                 server.login(cfg["username"], cfg["password"])
                 server.sendmail(cfg["from_addr"], cfg["to_addrs"], msg.as_string())
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _smtp_send)
             logger.info("Alert email sent: %s", subject)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to send alert email: %s", exc)
+            return False
