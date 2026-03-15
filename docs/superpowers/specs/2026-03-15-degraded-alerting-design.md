@@ -42,11 +42,17 @@ monitors:
     degraded_alert_minutes: 10   # alert if degraded for 10+ continuous minutes
     degraded_alert_cycles: 5     # alert if degraded for 5+ consecutive polls
     # omit both to disable degraded alerting for this monitor
+
+  dns:
+    degraded_alert_minutes: 5
+
+  speedtest:
+    degraded_alert_cycles: 3
 ```
 
-Either threshold triggers the alert independently. Both can be set simultaneously — the alert fires when the first threshold is crossed.
+Either threshold triggers the alert independently. Both can be set simultaneously — the alert fires when the first is crossed.
 
-`config.py` `DEFAULT_CONFIG` adds `degraded_alert_minutes: null` and `degraded_alert_cycles: null` to every monitor's defaults so the deep-merge works correctly and omitted keys are falsy.
+`config.py` `DEFAULT_CONFIG` adds `degraded_alert_minutes: null` and `degraded_alert_cycles: null` to every monitor's defaults so the deep-merge works correctly and omitted keys are falsy. When both are `null` or absent, the degraded accumulation block still runs (to track state and log events) but no alert is ever sent.
 
 ---
 
@@ -63,31 +69,85 @@ No new database functions are needed. The existing `db.get_state` / `db.set_stat
 
 **After a degraded alert fires:** both keys reset (`degraded_since` = current timestamp, `degraded_cycles` = `"1"`). The full threshold must be crossed again after the cooldown expires before another degraded alert fires.
 
-**On restart:** stale keys left from before a restart are preserved intentionally. If the monitor comes back `degraded`, the original onset timestamp is used (the degraded condition pre-dates the restart). If it comes back `ok` or `down`, the keys are cleared immediately.
+**On restart:** stale keys left from before a restart are preserved intentionally. If the monitor comes back `degraded`, the original onset timestamp and cycle count are used (the degraded condition pre-dates the restart). If it comes back `ok` or `down`, the keys are cleared immediately.
 
 ---
 
-### 3. `run_monitor()` logic (`main.py`)
+### 3. `_monitor_configs` in `main.py`
 
-The monitor config dict for each monitor is stored in a module-level `_monitor_configs: dict[str, dict]` populated during `main()` setup, so `run_monitor()` can look up thresholds without a config parameter change.
+A new module-level dict is added:
 
-The degraded check is inserted into the existing alert block:
-
+```python
+_monitor_configs: dict[str, dict] = {}
 ```
-if new_status == "down" and previous != "down":
-    # Clear degraded state — down path handles the alert
-    clear degraded_since and degraded_cycles for monitor
-    # ... existing send_alert + insert_event (unchanged)
 
-elif new_status == "ok" and previous == "down":
-    # ... existing send_recovery + flush_alert_queue + insert_event (unchanged)
+It is populated in `main()` immediately after `config = load_config()`, before any job closures are defined:
 
-elif new_status == "ok" and previous == "degraded":
-    # Degraded condition resolved — clear state, no alert, log event
-    clear degraded_since and degraded_cycles for monitor
-    await db.insert_event(status_change event)
+```python
+_monitor_configs = config.get("monitors", {})
+```
 
-elif new_status == "degraded":
+This gives `run_monitor()` access to per-monitor config (e.g., `_monitor_configs.get("ping", {})`) without changing the function's signature.
+
+---
+
+### 4. `run_monitor()` logic (`main.py`)
+
+#### Guard structure
+
+The existing `if _alerter and previous != new_status:` guard covers only *transitions*. The degraded accumulation block must fire on **every poll where `new_status == "degraded"`** — including polls where the monitor remains degraded (`previous == "degraded"`). It therefore lives **outside and after** the transition guard.
+
+The full updated alert section structure:
+
+```python
+# ── Transition-based alerts (existing guard, unchanged) ──────────────────────
+if _alerter and previous != new_status:
+    ts = results[0].timestamp
+    if new_status == "down":
+        if previous == "degraded":
+            # Log that degraded episode ended (entered down)
+            await db.insert_event({
+                "timestamp": ts, "event_type": "status_change",
+                "monitor": monitor_name,
+                "description": f"Status changed: degraded → down",
+                "previous_status": "degraded", "new_status": "down",
+            })
+        # Clear any degraded state
+        await db.set_state(f"degraded_since:{monitor_name}", "")
+        await db.set_state(f"degraded_cycles:{monitor_name}", "")
+        # Existing down-alert path (send_alert + insert_event) unchanged
+        ...
+
+    elif new_status == "ok" and previous == "down":
+        # Existing recovery path (send_recovery + flush + insert_event) unchanged
+        ...
+
+    elif new_status == "ok" and previous == "degraded":
+        # Degraded resolved — clear state, log event, no alert
+        await db.set_state(f"degraded_since:{monitor_name}", "")
+        await db.set_state(f"degraded_cycles:{monitor_name}", "")
+        await db.insert_event({
+            "timestamp": ts, "event_type": "status_change",
+            "monitor": monitor_name,
+            "description": f"Status recovered: degraded → ok",
+            "previous_status": "degraded", "new_status": "ok",
+        })
+
+    elif new_status == "degraded" and previous != "degraded":
+        # Onset: log the transition event
+        await db.insert_event({
+            "timestamp": ts, "event_type": "status_change",
+            "monitor": monitor_name,
+            "description": f"Status changed: {previous} → degraded",
+            "previous_status": previous, "new_status": "degraded",
+        })
+
+# ── Degraded accumulation (runs every poll where new_status == "degraded") ───
+if _alerter and new_status == "degraded":
+    ts = results[0].timestamp
+    now = datetime.now(timezone.utc)
+    monitor_cfg = _monitor_configs.get(monitor_name, {})
+
     since = await db.get_state(f"degraded_since:{monitor_name}") or ""
     cycles = int(await db.get_state(f"degraded_cycles:{monitor_name}") or "0") + 1
 
@@ -99,27 +159,30 @@ elif new_status == "degraded":
 
     threshold_minutes = monitor_cfg.get("degraded_alert_minutes")
     threshold_cycles  = monitor_cfg.get("degraded_alert_cycles")
-    elapsed_minutes   = (now - datetime.fromisoformat(since)).total_seconds() / 60
-    minutes_hit = threshold_minutes and elapsed_minutes >= threshold_minutes
-    cycles_hit  = threshold_cycles  and cycles >= threshold_cycles
 
-    if (minutes_hit or cycles_hit) and not _alerter._in_cooldown(monitor_name):
-        duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
-        desc = "; ".join(r.message for r in results if r.message) or "No detail"
-        await _alerter.send_degraded_alert(monitor_name, desc, ts, duration_str)
-        # Reset timer so threshold must be crossed again after cooldown expires
-        await db.set_state(f"degraded_since:{monitor_name}", ts)
-        await db.set_state(f"degraded_cycles:{monitor_name}", "1")
-        await db.insert_event(status_change event)
+    if threshold_minutes or threshold_cycles:
+        elapsed_minutes = (now - datetime.fromisoformat(since)).total_seconds() / 60
+        minutes_hit = threshold_minutes and elapsed_minutes >= float(threshold_minutes)
+        cycles_hit  = threshold_cycles  and cycles >= int(threshold_cycles)
+
+        if minutes_hit or cycles_hit:
+            duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
+            desc = "; ".join(r.message for r in results if r.message) or "No detail"
+            await _alerter.send_degraded_alert(monitor_name, desc, ts, duration_str)
+            # Reset timer so full threshold must be crossed again after cooldown
+            await db.set_state(f"degraded_since:{monitor_name}", ts)
+            await db.set_state(f"degraded_cycles:{monitor_name}", "1")
 ```
 
-The `degraded → ok` branch fires even when `previous == "degraded"` but `new_status == "ok"` in cases where the monitor recovered without ever triggering an alert (threshold never crossed). The event is always logged; the alert is only sent when the threshold was crossed.
+#### `down → degraded` transition
+
+When `previous == "down"` and `new_status == "degraded"`, the monitor has partially recovered. No recovery email is sent (the monitor is not yet `ok`). Because `"down" != "degraded"`, the `elif new_status == "degraded" and previous != "degraded"` branch fires and logs a `status_change` onset event. The degraded accumulation block then starts fresh. The existing down-alert cooldown remains active and will suppress the first degraded alert for up to `cooldown_minutes` — this is accepted behaviour (shared cooldown, user's explicit choice).
 
 ---
 
-### 4. `EmailAlerter.send_degraded_alert()` (`alerts/email_alert.py`)
+### 5. `EmailAlerter.send_degraded_alert()` (`alerts/email_alert.py`)
 
-New public method added after `send_recovery`:
+New public method added after `send_recovery`. The cooldown is checked **only inside this method** (consistent with `send_alert` — the call site in `run_monitor()` does not pre-check cooldown):
 
 ```python
 async def send_degraded_alert(
@@ -150,34 +213,38 @@ async def send_degraded_alert(
         await db.enqueue_alert(created_at, subject, body)
 ```
 
-Follows the exact pattern of `send_alert`: cooldown check, render, send, set cooldown on success, enqueue on failure.
-
 ---
 
-### 5. Files changed
+### 6. Files changed
 
 | File | Change |
 |------|--------|
 | `alerts/email_alert.py` | Add `send_degraded_alert()` |
-| `main.py` | Add `_monitor_configs` module-level dict; add degraded tracking logic in `run_monitor()`; add `degraded → ok` event logging |
+| `main.py` | Add `_monitor_configs` module-level dict; restructure alert block to add degraded accumulation section outside transition guard; add all degraded transition event logging |
 | `config.py` | Add `degraded_alert_minutes: null` and `degraded_alert_cycles: null` to each monitor's defaults |
 | `config.example.yaml` | Document the new config keys with example values |
 
 ---
 
-### 6. Testing
+### 7. Testing
 
 **`tests/test_email_alert.py`** — new tests:
 - `test_send_degraded_alert_sends_email` — enabled alerter, no cooldown → email sent, cooldown set
 - `test_degraded_alert_respects_cooldown` — cooldown active → no send
 - `test_degraded_alert_enqueues_on_failure` — SMTP fails → row in `alert_queue`
+- `test_send_degraded_alert_disabled` — alerter disabled → no send, no enqueue
 
-**`tests/test_degraded_alerting.py`** (new file) — `run_monitor()` integration tests using a real isolated DB:
-- Minutes threshold not yet crossed → no alert, state written
-- Minutes threshold crossed → alert fires, state resets
+**`tests/test_degraded_alerting.py`** (new file) — `run_monitor()` integration tests using a real isolated DB and a mock `_alerter`:
+- Minutes threshold not yet crossed → no alert, state written correctly
+- Minutes threshold crossed → alert fires, timer resets to now
 - Cycles threshold crossed → alert fires
-- Both thresholds set: either crossing fires the alert
-- `degraded → down`: degraded state cleared, no degraded alert, down path takes over
-- `degraded → ok`: state cleared, no alert, `status_change` event logged
-- Alert fires, timer resets: second immediate call (in cooldown) → no second alert
-- State persists across calls: simulated multi-poll degraded episode
+- Both thresholds set: minutes crossed first → alert fires
+- Both thresholds set: cycles crossed first → alert fires
+- Neither threshold set (both null) → no alert ever fires, state still tracked
+- `degraded → down`: degraded state cleared, `status_change` event logged for degraded episode end, no degraded alert, down path unaffected
+- `down → degraded`: accumulation starts fresh; cooldown from prior down alert suppresses degraded alert
+- `degraded → ok`: state cleared, `status_change` event logged, no alert
+- Onset event logged on first degraded poll (before threshold crossed)
+- Alert fires, timer resets: next immediate call (in cooldown) → no second alert
+- Restart with stale keys: pre-populate `degraded_since` and `degraded_cycles` in DB, verify stale timestamp is used (not reset to current time)
+- Disabled path smoke test: both thresholds null, monitor repeatedly degraded → no alert, no error
