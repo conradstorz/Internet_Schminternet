@@ -100,6 +100,33 @@ class EmailAlerter:
         if not sent:
             await db.enqueue_alert(created_at, subject, body)
 
+    async def send_degraded_alert(
+        self,
+        monitor: str,
+        description: str,
+        created_at: str,
+        duration_str: str,
+    ) -> None:
+        """Emit a 'monitor is DEGRADED' email, respecting the cooldown window."""
+        if not self._enabled():
+            return
+        if self._in_cooldown(monitor):
+            return
+
+        subject = f"[Schminternet] {monitor.upper()} is DEGRADED"
+        body = (
+            f"Monitor:          {monitor}\n"
+            f"Status:           degraded\n"
+            f"Details:          {description}\n"
+            f"Degraded for:     {duration_str}\n"
+            f"Event time (UTC): {created_at}\n"
+        )
+        sent = await self._send(subject, body)
+        if sent:
+            self._cooldowns[monitor] = datetime.now(timezone.utc)
+        else:
+            await db.enqueue_alert(created_at, subject, body)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
