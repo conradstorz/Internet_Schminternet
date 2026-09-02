@@ -52,6 +52,7 @@ async def _clear_degraded_state(monitor_name: str) -> None:
     """Clear the degraded-episode state keys for a monitor (write "", not delete)."""
     await db.set_state(f"degraded_since:{monitor_name}", "")
     await db.set_state(f"degraded_cycles:{monitor_name}", "")
+    await db.set_state(f"degraded_onset:{monitor_name}", "")
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +238,13 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             # restart mid-episode, or a hypothetical degraded → unknown —
             # no monitor emits "unknown" today, but the invariant should
             # not depend on that): drop stale degraded state left over so
-            # a future degraded episode doesn't inherit it. Must stay last
-            # in this chain — the down, down → ok, and degraded → ok
-            # branches above are unaffected since they match first.
+            # a future degraded episode doesn't inherit it. Must stay after
+            # the three specific branches above (down, down → ok, and
+            # degraded → ok) — they match first since they're narrower and
+            # evaluated earlier, so their behavior is unaffected. The
+            # degraded-onset branch below it is unaffected too, since
+            # new_status != "degraded" never matches when new_status ==
+            # "degraded".
             await _clear_degraded_state(monitor_name)
 
         elif new_status == "degraded" and previous != "degraded":
@@ -266,6 +271,14 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
         if not since:
             since = ts  # first degraded poll for this episode
+            # True episode onset — written only here, at episode start, and
+            # never touched again while the episode continues (unlike
+            # degraded_since above, which is deliberately reset to `ts` after
+            # each alert fires, since it also doubles as the threshold-window
+            # start). Kept as a separate key so the queue de-dup below can be
+            # scoped to the whole episode instead of drifting forward on
+            # every other alert.
+            await db.set_state(f"degraded_onset:{monitor_name}", ts)
 
         await db.set_state(f"degraded_since:{monitor_name}", since)
         await db.set_state(f"degraded_cycles:{monitor_name}", str(cycles))
@@ -281,8 +294,13 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             if minutes_hit or cycles_hit:
                 duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
                 desc = "; ".join(r.message for r in results if r.message) or "No detail"
+                # Guarded read: fall back to `since` when degraded_onset is
+                # empty or missing, so a DB written by an older version of
+                # this code (which never wrote degraded_onset) degrades
+                # gracefully instead of raising.
+                onset = await db.get_state(f"degraded_onset:{monitor_name}") or since
                 alert_in_flight = await _alerter.send_degraded_alert(
-                    monitor_name, desc, ts, duration_str, since
+                    monitor_name, desc, ts, duration_str, onset
                 )
                 if alert_in_flight:
                     # Reset timer so full threshold must be crossed again after cooldown

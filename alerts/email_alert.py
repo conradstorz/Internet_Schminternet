@@ -110,11 +110,17 @@ class EmailAlerter:
     ) -> bool:
         """Emit a 'monitor is DEGRADED' email, respecting the cooldown window.
 
-        ``episode_since`` is the onset timestamp of the CURRENT degraded
-        episode (``run_monitor()``'s ``degraded_since:{monitor}`` value,
-        passed through as ``since``). It scopes the queue de-dup below to
-        this episode only, so a pending row left over from an older,
-        already-ended episode can never suppress the alert for a new one.
+        ``episode_since`` is the true onset timestamp of the CURRENT degraded
+        episode — ``run_monitor()``'s ``degraded_onset:{monitor}`` state key,
+        written once when the episode begins and never touched again while it
+        continues (unlike ``degraded_since:{monitor}``, which doubles as the
+        threshold-window start and is deliberately reset to the current event
+        timestamp after every alert that fires). Passing the stable onset
+        here — rather than the threshold-window start — is what keeps this
+        value identical across every crossing within one episode. It scopes
+        the queue de-dup below to this episode only, so a pending row left
+        over from an older, already-ended episode can never suppress the
+        alert for a new one.
 
         Returns True when an alert for this episode is now in flight — the
         email was sent, was queued for later delivery, or a pending row

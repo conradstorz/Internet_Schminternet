@@ -264,9 +264,9 @@ Post-review, two consequences of the original **unconditional** reset in §4 and
 - Before enqueueing a failed send, `send_degraded_alert()` reads `db.get_pending_alerts()` and skips the enqueue if a pending row already has this exact subject **and belongs to the same episode** — logged at debug level — and still returns `True` (the pending row already covers this episode).
 - The call site in `run_monitor()` resets `degraded_since` / `degraded_cycles` only when `send_degraded_alert()` returns truthy. When it returns `False`, the episode keeps accumulating and the alert goes out on the next poll after the cooldown expires.
 
-Everything else in §1–§4 is unchanged: thresholds are still truthiness-checked, the cooldown is still shared with `down` alerts and still checked only inside `EmailAlerter`, a failed send still does not set the cooldown, and `degraded → down` still logs both of its events.
-
 **Consequence — alerting disabled with a threshold configured:** with `enabled: false`, `send_degraded_alert()` returns `False` on every call (its `if not self._enabled(): return False` guard fires before anything else), so the episode timer never resets and `degraded_cycles` climbs for the entire life of the episode. This is harmless: no SMTP is attempted either way, and `degraded_since` / `degraded_cycles` are still cleared as soon as the monitor leaves `degraded` (via `_clear_degraded_state`) — it is simply a visible consequence of the conditional reset added above.
+
+Everything else in §1–§4 is unchanged: thresholds are still truthiness-checked, the cooldown is still shared with `down` alerts and still checked only inside `EmailAlerter`, a failed send still does not set the cooldown, and `degraded → down` still logs both of its events.
 
 ### Amendment — 2026-09-02: episode-scoped queue de-dup (fixing a review finding on the amendment above)
 
@@ -279,3 +279,28 @@ The de-dup added just above matched on **subject alone**, with no notion of whic
 - The call site in `run_monitor()` now passes `since` as the fifth argument: `_alerter.send_degraded_alert(monitor_name, desc, ts, duration_str, since)`.
 
 `send_alert()` (the `down` path) was not touched — it never had a de-dup and still doesn't; two consecutive failed `down` sends still enqueue two rows, pinned by `tests/test_email_alert.py::test_send_alert_never_dedups_across_calls`.
+
+**Superseded by the amendment below:** passing `since` (`degraded_since:{monitor}`) as `episode_since` was itself a bug — see the next amendment.
+
+### Amendment — 2026-09-02: episode-onset key fix (regression in the amendment above)
+
+Passing `since` (i.e. `degraded_since:{monitor}`) as `episode_since` conflated two different meanings. `degraded_since` is the *threshold-window* start: §2 and the "After a degraded alert fires" note above both specify it is deliberately reset to the current event timestamp after every alert that fires. `episode_since`, per the previous amendment's own stated purpose, needs to be the *episode* start — stable across the whole episode.
+
+**Problem observed:** within one continuous degraded episode with SMTP unreachable, each alert that fires resets `degraded_since` to the new event timestamp. So the *next* crossing's `episode_since` is newer than the pending row's `created_at` from the *first* crossing, the `created_at >= episode_since` check fails, and a second row gets queued — even though it's the same episode. This repeats roughly every other crossing: 8 crossings in one episode queued 4 rows, exactly the burst-of-duplicates problem the de-dup exists to prevent, just at a slower rate than before the previous amendment.
+
+**Fix:**
+- Added a third `state` key, `degraded_onset:{monitor}`, alongside `degraded_since:{monitor}` and `degraded_cycles:{monitor}` in the existing `state` table (no schema change). Written only when an episode begins — the same `if not since:` condition that seeds `degraded_since` — and never touched again while the episode continues. `degraded_since`'s reset-after-alert behavior is unchanged.
+- `_clear_degraded_state()` clears all three keys (same write-`""` convention) on every exit from `degraded`.
+- The call site now passes `degraded_onset` (read with a guard: `await db.get_state(f"degraded_onset:{monitor_name}") or since`, so a DB written by the pre-fix code — which has no `degraded_onset` row — falls back to `since` instead of raising) as `episode_since`.
+
+With this, every crossing within one episode sees the same `episode_since`, so exactly one row stays queued no matter how many times the threshold is re-crossed; a new episode gets a strictly newer onset than any stale row's `created_at`, so it still queues its own row (the cross-episode behavior added by the previous amendment is preserved).
+
+**State table, corrected:**
+
+| Key | Value | Written | Cleared |
+|-----|-------|---------|---------|
+| `degraded_since:{monitor}` | ISO-8601 UTC timestamp | First degraded poll; reset to the event timestamp after every alert that fires | When monitor leaves `degraded` |
+| `degraded_cycles:{monitor}` | Integer string | Incremented every degraded poll; reset to `"1"` after every alert that fires | Same as above |
+| `degraded_onset:{monitor}` | ISO-8601 UTC timestamp | First degraded poll only (same condition as `degraded_since`'s first write); never reset | Same as above |
+
+`tests/test_degraded_alerting.py::test_episode_since_stable_across_repeated_crossings` pins this: a monitor with `degraded_alert_cycles: 1` (crosses threshold on every poll) run for 6 polls with the mock alerter returning `True` each time — matching the real call-site loop — asserts `episode_since` is identical across all 6 calls, and that `degraded_onset` never changes while `degraded_since` keeps advancing. `tests/test_email_alert.py::test_degraded_alert_dedups_within_same_episode` was rewritten to reflect what the call site now actually does: 4 consecutive failed sends with a *fixed* onset (previously the test artificially reused the same onset for only 2 calls, which the pre-fix call site never did after the first alert) still leave exactly one queued row.
