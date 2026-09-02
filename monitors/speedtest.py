@@ -45,7 +45,7 @@ async def run(config: dict) -> list[MonitorResult]:
     expected_ul = cfg.get("expected_upload_mbps", 0)
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         download, upload, ping = await loop.run_in_executor(None, _run_speedtest_sync)
         ts = datetime.now(timezone.utc).isoformat()
 

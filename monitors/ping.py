@@ -77,16 +77,15 @@ async def run(config: dict) -> list[MonitorResult]:
     count = cfg.get("count", 5)
     thresholds = cfg.get("thresholds", {})
 
-    results: list[MonitorResult] = []
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    for target in targets:
+    async def _check(target: str) -> list[MonitorResult]:
         latency_ms, loss_pct = await loop.run_in_executor(
             None, _ping_sync, target, count
         )
         ts = datetime.now(timezone.utc).isoformat()
         status = _determine_status(latency_ms, loss_pct, thresholds)
-
+        results: list[MonitorResult] = []
         if latency_ms is not None:
             results.append(
                 MonitorResult(
@@ -108,5 +107,7 @@ async def run(config: dict) -> list[MonitorResult]:
                 status=status,
             )
         )
+        return results
 
-    return results
+    nested = await asyncio.gather(*[_check(t) for t in targets])
+    return [r for sublist in nested for r in sublist]

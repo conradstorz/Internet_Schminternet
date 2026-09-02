@@ -7,6 +7,7 @@ us distinguish "my local DNS is down" from "upstream DNS is slow".
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 
@@ -33,9 +34,7 @@ async def run(config: dict) -> list[MonitorResult]:
     test_domain = cfg.get("test_domain", "google.com")
     thresholds = cfg.get("thresholds", {})
 
-    results: list[MonitorResult] = []
-
-    for server in servers:
+    async def _check(server: str) -> MonitorResult:
         ts = datetime.now(timezone.utc).isoformat()
         try:
             resolver = dns.asyncresolver.Resolver(configure=False)
@@ -48,27 +47,23 @@ async def run(config: dict) -> list[MonitorResult]:
             elapsed_ms = (time.perf_counter() - start) * 1000
 
             status = _determine_status(elapsed_ms, thresholds)
-            results.append(
-                MonitorResult(
-                    monitor="dns",
-                    target=server,
-                    timestamp=ts,
-                    metric="resolution_ms",
-                    value=round(elapsed_ms, 2),
-                    status=status,
-                )
+            return MonitorResult(
+                monitor="dns",
+                target=server,
+                timestamp=ts,
+                metric="resolution_ms",
+                value=round(elapsed_ms, 2),
+                status=status,
             )
         except Exception as exc:
-            results.append(
-                MonitorResult(
-                    monitor="dns",
-                    target=server,
-                    timestamp=ts,
-                    metric="resolution_ms",
-                    value=-1.0,
-                    status="down",
-                    message=str(exc),
-                )
+            return MonitorResult(
+                monitor="dns",
+                target=server,
+                timestamp=ts,
+                metric="resolution_ms",
+                value=-1.0,
+                status="down",
+                message=str(exc),
             )
 
-    return results
+    return list(await asyncio.gather(*[_check(s) for s in servers]))

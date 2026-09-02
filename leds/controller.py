@@ -39,7 +39,6 @@ class LEDController:
         self._segments: dict[str, list[int]] = config.get("segments", {})
         self._strip = None
         self._Color = None
-        self._loop = asyncio.get_event_loop()
 
         if self._enabled:
             self._init_hardware(config)
@@ -100,12 +99,12 @@ class LEDController:
     # ------------------------------------------------------------------
 
     async def update_segment(self, monitor: str, status: str) -> None:
-        await self._loop.run_in_executor(
-            None, self._update_segment_sync, monitor, status
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._update_segment_sync, monitor, status)
 
     async def set_all(self, color: tuple[int, int, int]) -> None:
-        await self._loop.run_in_executor(None, self._set_all_sync, color)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._set_all_sync, color)
 
     async def blackout(self) -> None:
         await self.set_all(_OFF)
