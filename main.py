@@ -231,10 +231,15 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                 }
             )
 
-        elif new_status == "ok":
-            # Any other transition into ok (e.g. unknown → ok after a restart
-            # mid-episode): drop stale degraded state left over from before
-            # the restart so a future degraded episode doesn't inherit it.
+        elif new_status != "degraded":
+            # Catch-all for any transition landing outside "degraded" that
+            # the branches above didn't handle (e.g. unknown → ok after a
+            # restart mid-episode, or a hypothetical degraded → unknown —
+            # no monitor emits "unknown" today, but the invariant should
+            # not depend on that): drop stale degraded state left over so
+            # a future degraded episode doesn't inherit it. Must stay last
+            # in this chain — the down, down → ok, and degraded → ok
+            # branches above are unaffected since they match first.
             await _clear_degraded_state(monitor_name)
 
         elif new_status == "degraded" and previous != "degraded":
@@ -277,7 +282,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                 duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
                 desc = "; ".join(r.message for r in results if r.message) or "No detail"
                 alert_in_flight = await _alerter.send_degraded_alert(
-                    monitor_name, desc, ts, duration_str
+                    monitor_name, desc, ts, duration_str, since
                 )
                 if alert_in_flight:
                     # Reset timer so full threshold must be crossed again after cooldown

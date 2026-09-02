@@ -260,8 +260,22 @@ Post-review, two consequences of the original **unconditional** reset in §4 and
 - (b) A failed send correctly does not set the cooldown (queuing must keep working through an outage), but with no de-dup a multi-hour degraded episode at a short threshold queued dozens of near-identical emails, all delivered in a burst once SMTP recovered.
 
 **Fix:**
-- `send_degraded_alert()` now returns `bool` instead of `None`: `True` when an alert for the episode is now in flight (sent, queued, or an identical one already pending), `False` when nothing happened (disabled, or cooldown-suppressed).
-- Before enqueueing a failed send, `send_degraded_alert()` reads `db.get_pending_alerts()` and skips the enqueue if a pending row already has this exact subject — logged at debug level — and still returns `True` (the pending row already covers this episode).
+- `send_degraded_alert()` now returns `bool` instead of `None`: `True` when an alert for the episode is now in flight (sent, queued, or an identical one already pending for THIS episode), `False` when nothing happened (disabled, or cooldown-suppressed).
+- Before enqueueing a failed send, `send_degraded_alert()` reads `db.get_pending_alerts()` and skips the enqueue if a pending row already has this exact subject **and belongs to the same episode** — logged at debug level — and still returns `True` (the pending row already covers this episode).
 - The call site in `run_monitor()` resets `degraded_since` / `degraded_cycles` only when `send_degraded_alert()` returns truthy. When it returns `False`, the episode keeps accumulating and the alert goes out on the next poll after the cooldown expires.
 
 Everything else in §1–§4 is unchanged: thresholds are still truthiness-checked, the cooldown is still shared with `down` alerts and still checked only inside `EmailAlerter`, a failed send still does not set the cooldown, and `degraded → down` still logs both of its events.
+
+**Consequence — alerting disabled with a threshold configured:** with `enabled: false`, `send_degraded_alert()` returns `False` on every call (its `if not self._enabled(): return False` guard fires before anything else), so the episode timer never resets and `degraded_cycles` climbs for the entire life of the episode. This is harmless: no SMTP is attempted either way, and `degraded_since` / `degraded_cycles` are still cleared as soon as the monitor leaves `degraded` (via `_clear_degraded_state`) — it is simply a visible consequence of the conditional reset added above.
+
+### Amendment — 2026-09-02: episode-scoped queue de-dup (fixing a review finding on the amendment above)
+
+The de-dup added just above matched on **subject alone**, with no notion of which episode a pending row belonged to. Since the DEGRADED subject is identical for every episode of a given monitor (`"[Schminternet] PING is DEGRADED"` forever), a pending row left over from an episode that had already ended (`degraded → ok`, which does not flush the queue) would suppress the enqueue for every later episode of that monitor indefinitely — collapsing across episodes instead of within one, and eventually delivering a single stale email describing a long-past episode once SMTP recovered.
+
+**Fix:**
+- `send_degraded_alert()` gained a new required parameter, `episode_since` — the onset timestamp of the *current* episode, i.e. `run_monitor()`'s `since` (the value read from/written to `degraded_since:{monitor}`).
+- The de-dup check now requires **both** a matching subject **and** the pending row's `created_at >= episode_since`. All these timestamps are `datetime.now(timezone.utc).isoformat()` strings in one fixed format, so plain string comparison orders them correctly — no `datetime.fromisoformat()` parsing needed for the comparison itself.
+- A pending row from an older, already-ended episode (its `created_at` predates the new episode's onset) no longer suppresses the enqueue; the new alert is queued as its own row, so the queue can hold more than one DEGRADED row per monitor when episodes are separated by an outage.
+- The call site in `run_monitor()` now passes `since` as the fifth argument: `_alerter.send_degraded_alert(monitor_name, desc, ts, duration_str, since)`.
+
+`send_alert()` (the `down` path) was not touched — it never had a de-dup and still doesn't; two consecutive failed `down` sends still enqueue two rows, pinned by `tests/test_email_alert.py::test_send_alert_never_dedups_across_calls`.
