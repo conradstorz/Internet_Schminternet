@@ -106,14 +106,21 @@ class EmailAlerter:
         description: str,
         created_at: str,
         duration_str: str,
+        episode_since: str,
     ) -> bool:
         """Emit a 'monitor is DEGRADED' email, respecting the cooldown window.
 
+        ``episode_since`` is the onset timestamp of the CURRENT degraded
+        episode (``run_monitor()``'s ``degraded_since:{monitor}`` value,
+        passed through as ``since``). It scopes the queue de-dup below to
+        this episode only, so a pending row left over from an older,
+        already-ended episode can never suppress the alert for a new one.
+
         Returns True when an alert for this episode is now in flight — the
-        email was sent, was queued for later delivery, or an identical
-        degraded alert is already pending in the queue (in which case the
-        pending row already covers this episode, so nothing new is
-        enqueued). Returns False when nothing was done: alerting is
+        email was sent, was queued for later delivery, or a pending row
+        already covers THIS episode (same subject, and that row's
+        ``created_at`` is at or after ``episode_since``), so nothing new is
+        enqueued. Returns False when nothing was done: alerting is
         disabled, or the send was suppressed by the cooldown. Callers use
         the return value to decide whether to reset the degraded-episode
         timer.
@@ -121,7 +128,10 @@ class EmailAlerter:
         if not self._enabled():
             return False
         if self._in_cooldown(monitor):
-            logger.debug("Alert suppressed for %s (in cooldown)", monitor)
+            logger.debug(
+                "Degraded alert suppressed for %s (in cooldown); episode timer not reset",
+                monitor,
+            )
             return False
 
         subject = f"[Schminternet] {monitor.upper()} is DEGRADED"
@@ -137,10 +147,16 @@ class EmailAlerter:
             self._cooldowns[monitor] = datetime.now(timezone.utc)
             return True
 
+        # All these timestamps are datetime.now(timezone.utc).isoformat()
+        # strings in a single fixed format, so a plain string comparison
+        # orders them correctly (no need to parse back to datetime).
         pending = await db.get_pending_alerts()
-        if any(row["subject"] == subject for row in pending):
+        if any(
+            row["subject"] == subject and row["created_at"] >= episode_since
+            for row in pending
+        ):
             logger.debug(
-                "Degraded alert for %s already pending in queue; skipping enqueue",
+                "Degraded alert for %s already pending for this episode; skipping enqueue",
                 monitor,
             )
             return True

@@ -390,3 +390,22 @@ async def test_true_return_resets_episode_state(env):
     cycles = await db.get_state("degraded_cycles:ping")
     assert since == ts
     assert cycles == "1"
+
+
+# ---------------------------------------------------------------------------
+# 16. degraded -> unknown clears state (unreachable today — no monitor emits
+#     "unknown" — but the invariant must hold by construction, same shape as
+#     the restart-to-ok bug fixed for case 13).
+# ---------------------------------------------------------------------------
+
+async def test_degraded_to_unknown_clears_stale_degraded_keys(env):
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {}
+
+    await db.set_state("degraded_since:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_cycles:ping", "4")
+
+    await main.run_monitor("ping", _results("ping", "unknown", message=""))
+
+    assert await db.get_state("degraded_since:ping") == ""
+    assert await db.get_state("degraded_cycles:ping") == ""

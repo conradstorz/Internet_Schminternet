@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,7 +109,7 @@ async def test_send_degraded_alert_sends_email():
     ts = datetime.now(timezone.utc).isoformat()
     smtp = _mock_smtp_success()
     with patch("smtplib.SMTP", return_value=smtp) as mock_smtp:
-        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     mock_smtp.assert_called_once()
     assert "ping" in alerter._cooldowns
     sent_message = smtp.sendmail.call_args.args[2]
@@ -122,7 +122,7 @@ async def test_degraded_alert_respects_cooldown():
     alerter._cooldowns["ping"] = datetime.now(timezone.utc)
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP") as mock_smtp:
-        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     mock_smtp.assert_not_called()
     assert await db.get_pending_alerts() == []
 
@@ -132,7 +132,7 @@ async def test_degraded_alert_enqueues_on_failure():
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
-        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     rows = await db.get_pending_alerts()
     assert len(rows) == 1
     assert rows[0]["subject"] == "[Schminternet] PING is DEGRADED"
@@ -144,7 +144,7 @@ async def test_send_degraded_alert_disabled():
     alerter = EmailAlerter(_cfg(enabled=False))
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP") as mock_smtp:
-        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     mock_smtp.assert_not_called()
     assert await db.get_pending_alerts() == []
 
@@ -158,7 +158,7 @@ async def test_send_degraded_alert_returns_true_on_success():
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", return_value=_mock_smtp_success()):
-        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     assert result is True
 
 
@@ -167,7 +167,7 @@ async def test_send_degraded_alert_returns_true_on_enqueue():
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
-        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     assert result is True
 
 
@@ -177,7 +177,7 @@ async def test_send_degraded_alert_returns_false_when_in_cooldown():
     alerter._cooldowns["ping"] = datetime.now(timezone.utc)
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP") as mock_smtp:
-        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     mock_smtp.assert_not_called()
     assert result is False
 
@@ -187,28 +187,54 @@ async def test_send_degraded_alert_returns_false_when_disabled():
     alerter = EmailAlerter(_cfg(enabled=False))
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP") as mock_smtp:
-        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     mock_smtp.assert_not_called()
     assert result is False
 
 
 # ---------------------------------------------------------------------------
-# Degraded alerts — queue de-duplication
+# Degraded alerts — queue de-duplication (episode-scoped)
 # ---------------------------------------------------------------------------
 
-async def test_degraded_alert_dedups_identical_pending_subject():
-    """Two consecutive failed sends for the same monitor leave exactly one
-    row in alert_queue, and the second call still returns True."""
+async def test_degraded_alert_dedups_within_same_episode():
+    """Two consecutive failed sends carrying the SAME episode onset leave
+    exactly one row in alert_queue, and the second call still returns True."""
     alerter = EmailAlerter(_cfg())
-    ts = datetime.now(timezone.utc).isoformat()
+    onset = datetime.now(timezone.utc).isoformat()
+    ts1 = onset
+    ts2 = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
-        first = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
-        second = await alerter.send_degraded_alert("ping", "high latency", ts, "22m")
+        first = await alerter.send_degraded_alert("ping", "high latency", ts1, "12m", onset)
+        second = await alerter.send_degraded_alert("ping", "high latency", ts2, "22m", onset)
     assert first is True
     assert second is True
     rows = await db.get_pending_alerts()
     assert len(rows) == 1
-    assert rows[0]["subject"] == "[Schminternet] PING is DEGRADED"
+    assert {r["subject"] for r in rows} == {"[Schminternet] PING is DEGRADED"}
+
+
+async def test_degraded_alert_cross_episode_not_deduped():
+    """A pending row from an OLDER episode (its created_at predates the new
+    episode's onset) must NOT suppress the new enqueue — the new alert is
+    queued as its own row, leaving two rows with the same subject."""
+    alerter = EmailAlerter(_cfg())
+    onset1 = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        await alerter.send_degraded_alert("ping", "high latency", onset1, "12m", onset1)
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+    first_created_at = rows[0]["created_at"]
+
+    # Episode 2's onset is strictly later than episode 1's queued row —
+    # these are all datetime.now(timezone.utc).isoformat() strings in a
+    # single fixed format, so a later onset sorts as a greater string too.
+    onset2 = (datetime.fromisoformat(first_created_at) + timedelta(days=1)).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        second = await alerter.send_degraded_alert("ping", "high latency", onset2, "5m", onset2)
+    assert second is True
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 2
+    assert {r["subject"] for r in rows} == {"[Schminternet] PING is DEGRADED"}
 
 
 async def test_degraded_alert_dedup_keyed_on_subject_not_any_pending():
@@ -217,7 +243,45 @@ async def test_degraded_alert_dedup_keyed_on_subject_not_any_pending():
     alerter = EmailAlerter(_cfg())
     ts = datetime.now(timezone.utc).isoformat()
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
-        await alerter.send_degraded_alert("dns", "high latency", ts, "12m")
-        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("dns", "high latency", ts, "12m", ts)
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
     rows = await db.get_pending_alerts()
     assert len(rows) == 2
+    assert {r["subject"] for r in rows} == {
+        "[Schminternet] DNS is DEGRADED",
+        "[Schminternet] PING is DEGRADED",
+    }
+
+
+async def test_degraded_alert_not_suppressed_by_pending_down_alert():
+    """A pending DOWN-subject row for the same monitor (different subject)
+    must not suppress a degraded enqueue."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        await alerter.send_alert("ping", "went down", "down", "ok", ts)
+    rows = await db.get_pending_alerts()
+    assert {r["subject"] for r in rows} == {"[Schminternet] PING is DOWN"}
+
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m", ts)
+    assert result is True
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 2
+    assert {r["subject"] for r in rows} == {
+        "[Schminternet] PING is DOWN",
+        "[Schminternet] PING is DEGRADED",
+    }
+
+
+async def test_send_alert_never_dedups_across_calls():
+    """The de-dup added to send_degraded_alert must not leak into the down
+    path: two consecutive failed send_alert calls still leave two rows."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        await alerter.send_alert("ping", "went down", "down", "ok", ts)
+        await alerter.send_alert("ping", "still down", "down", "ok", ts)
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 2
+    assert {r["subject"] for r in rows} == {"[Schminternet] PING is DOWN"}

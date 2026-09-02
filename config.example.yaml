@@ -56,10 +56,11 @@ monitors:
 
   ip:
     interval_seconds: 300    # Check for IP changes every 5 minutes
-    # ip's "degraded" is a momentary one-poll flag (set only on the single
-    # poll where the external IP changed; the next poll is back to "ok"), so
-    # sustained-degraded thresholds (degraded_alert_minutes / _cycles) can
-    # never be reached here and are intentionally not offered.
+    # ip's "degraded" lasts exactly one poll (set only on the poll where the
+    # external IP changed; the next poll is back to "ok"), so any
+    # degraded_alert_cycles above 1, and any degraded_alert_minutes, can
+    # never be reached — only degraded_alert_cycles: 1 (alerting on every
+    # single IP change) would ever fire.
 
 database:
   path: "data/schminternet.db"
