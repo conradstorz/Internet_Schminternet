@@ -6,7 +6,7 @@ import textwrap
 import pytest
 import yaml
 
-from config import load_config
+from config import DEFAULT_CONFIG, load_config
 
 
 def test_defaults_when_file_missing():
@@ -60,3 +60,30 @@ def test_leds_section(tmp_path):
     assert cfg["leds"]["count"] == 30
     # Other LED keys still present
     assert "segments" in cfg["leds"]
+
+
+def test_degraded_alert_keys_default_to_none():
+    """Every monitor has both degraded-alert keys, defaulting to None (feature off)."""
+    for name, monitor in DEFAULT_CONFIG["monitors"].items():
+        assert "degraded_alert_minutes" in monitor, f"{name} missing minutes key"
+        assert "degraded_alert_cycles" in monitor, f"{name} missing cycles key"
+        assert monitor["degraded_alert_minutes"] is None
+        assert monitor["degraded_alert_cycles"] is None
+
+
+def test_degraded_alert_minutes_override(tmp_path):
+    """Setting degraded_alert_minutes leaves the cycles key and thresholds untouched."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        textwrap.dedent("""\
+            monitors:
+              ping:
+                degraded_alert_minutes: 10
+        """),
+        encoding="utf-8",
+    )
+    cfg = load_config(str(cfg_file))
+    ping = cfg["monitors"]["ping"]
+    assert ping["degraded_alert_minutes"] == 10
+    assert ping["degraded_alert_cycles"] is None
+    assert ping["thresholds"] == DEFAULT_CONFIG["monitors"]["ping"]["thresholds"]
