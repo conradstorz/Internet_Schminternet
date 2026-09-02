@@ -10,6 +10,10 @@ monitors:
       # - "192.168.1.1" # Your router gateway (uncomment and adjust)
     interval_seconds: 30
     count: 5
+    # Degraded alerting (opt-in): omit both keys to disable it for this monitor.
+    # Either threshold fires on its own; with both set, whichever is crossed first wins.
+    # degraded_alert_minutes: 10   # Alert after 10 minutes continuously degraded
+    # degraded_alert_cycles: 5     # ...or after 5 consecutive degraded polls
     thresholds:
       degraded_ms: 100
       down_ms: 500
@@ -22,6 +26,8 @@ monitors:
       - "1.1.1.1"    # Cloudflare DNS
     test_domain: "google.com"
     interval_seconds: 60
+    # Degraded alerting (opt-in) — see the ping section above for details.
+    # degraded_alert_minutes: 5     # Minutes alone is enough; cycles may stay unset
     thresholds:
       degraded_ms: 200
       down_ms: 1000
@@ -30,6 +36,8 @@ monitors:
     interval_seconds: 1800   # 30 minutes — don't run too often on Pi 3B
     expected_download_mbps: 50
     expected_upload_mbps: 10
+    # Degraded alerting (opt-in) — see the ping section above for details.
+    # degraded_alert_cycles: 3      # Cycles alone is enough; minutes may stay unset
     thresholds:
       degraded_ratio: 0.5    # Below 50% of expected = degraded
 
@@ -40,11 +48,17 @@ monitors:
       # Add any URLs you want to check reachability for
     interval_seconds: 120
     timeout_seconds: 10
+    # Degraded alerting (opt-in) — see the ping section above for details.
+    # degraded_alert_minutes: 10
+    # degraded_alert_cycles: 5
     thresholds:
       degraded_ms: 1000
 
   ip:
     interval_seconds: 300    # Check for IP changes every 5 minutes
+    # Degraded alerting (opt-in) — see the ping section above for details.
+    # degraded_alert_minutes: 30
+    # degraded_alert_cycles: 6
 
 database:
   path: "data/schminternet.db"
