@@ -197,17 +197,20 @@ async def test_send_degraded_alert_returns_false_when_disabled():
 # ---------------------------------------------------------------------------
 
 async def test_degraded_alert_dedups_within_same_episode():
-    """Two consecutive failed sends carrying the SAME episode onset leave
-    exactly one row in alert_queue, and the second call still returns True."""
+    """Several consecutive failed sends carrying a FIXED episode onset — what
+    the real call site now passes for every crossing within one continuous
+    episode — leave exactly one row in alert_queue, and every call still
+    returns True. A loop of 4+ calls (rather than just 2) is what would
+    catch the regression where a stale, drifting episode_since produced a
+    duplicate row roughly every two crossings."""
     alerter = EmailAlerter(_cfg())
     onset = datetime.now(timezone.utc).isoformat()
-    ts1 = onset
-    ts2 = datetime.now(timezone.utc).isoformat()
+    results = []
     with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
-        first = await alerter.send_degraded_alert("ping", "high latency", ts1, "12m", onset)
-        second = await alerter.send_degraded_alert("ping", "high latency", ts2, "22m", onset)
-    assert first is True
-    assert second is True
+        for _ in range(4):
+            ts = datetime.now(timezone.utc).isoformat()
+            results.append(await alerter.send_degraded_alert("ping", "high latency", ts, "12m", onset))
+    assert all(result is True for result in results)
     rows = await db.get_pending_alerts()
     assert len(rows) == 1
     assert {r["subject"] for r in rows} == {"[Schminternet] PING is DEGRADED"}

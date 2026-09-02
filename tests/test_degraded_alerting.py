@@ -111,6 +111,11 @@ async def test_minutes_threshold_crossed(env):
     expected_desc = "; ".join(r.message for r in _results("ping", "degraded", ts=ts) if r.message) or "No detail"
     assert call[0][1] == expected_desc
 
+    # episode_since (5th positional arg): no degraded_onset row was seeded for
+    # this test, so the call site must fall back to `since` (old_since) — the
+    # only onset value available before this poll.
+    assert call[0][4] == old_since
+
     since = await db.get_state("degraded_since:ping")
     cycles = await db.get_state("degraded_cycles:ping")
     assert since == ts
@@ -409,3 +414,93 @@ async def test_degraded_to_unknown_clears_stale_degraded_keys(env):
 
     assert await db.get_state("degraded_since:ping") == ""
     assert await db.get_state("degraded_cycles:ping") == ""
+
+
+# ---------------------------------------------------------------------------
+# 17. Regression: one continuous episode, repeated crossings, must see the
+#     SAME episode_since on every call — this is what pins the fix. Before
+#     the fix, `since` (degraded_since) was passed as episode_since, but
+#     run_monitor() resets degraded_since to `ts` on every truthy return
+#     from send_degraded_alert, so episode_since drifted forward on every
+#     other crossing (duplicate row roughly every two crossings).
+# ---------------------------------------------------------------------------
+
+async def test_episode_since_stable_across_repeated_crossings(env):
+    main._monitor_status["ping"] = "degraded"
+    # A cycles threshold of 1 crosses on every single degraded poll (cycles
+    # is reset to "1" after each alert, and the very next poll increments it
+    # back to 2 >= 1), so this reproduces the real call-site loop — threshold
+    # crossed repeatedly within one continuous episode — with no artificial
+    # state manipulation between polls.
+    main._monitor_configs["ping"] = {"degraded_alert_minutes": None, "degraded_alert_cycles": 1}
+
+    num_crossings = 6
+    for _ in range(num_crossings):
+        ts = datetime.now(timezone.utc).isoformat()
+        await main.run_monitor("ping", _results("ping", "degraded", ts=ts))
+
+    assert env.send_degraded_alert.call_count == num_crossings
+
+    episode_since_values = [c.args[4] for c in env.send_degraded_alert.call_args_list]
+    assert len(set(episode_since_values)) == 1, (
+        "episode_since must be identical on every call within one continuous "
+        f"episode; got {episode_since_values}"
+    )
+
+    # degraded_onset must never change across the episode, while
+    # degraded_since keeps advancing (its reset-on-alert behavior is
+    # deliberate and must not change).
+    onset = await db.get_state("degraded_onset:ping")
+    assert onset == episode_since_values[0]
+
+
+# ---------------------------------------------------------------------------
+# 18. degraded_onset cleared on degraded -> down
+# ---------------------------------------------------------------------------
+
+async def test_degraded_onset_cleared_on_degraded_to_down(env):
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {}
+
+    await db.set_state("degraded_since:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_onset:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_cycles:ping", "4")
+
+    await main.run_monitor("ping", _results("ping", "down", message="timeout"))
+
+    assert await db.get_state("degraded_onset:ping") == ""
+
+
+# ---------------------------------------------------------------------------
+# 19. degraded_onset cleared on degraded -> ok
+# ---------------------------------------------------------------------------
+
+async def test_degraded_onset_cleared_on_degraded_to_ok(env):
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {}
+
+    await db.set_state("degraded_since:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_onset:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_cycles:ping", "2")
+
+    await main.run_monitor("ping", _results("ping", "ok", message=""))
+
+    assert await db.get_state("degraded_onset:ping") == ""
+
+
+# ---------------------------------------------------------------------------
+# 20. degraded_onset cleared by the catch-all exit branch (e.g. degraded ->
+#     unknown)
+# ---------------------------------------------------------------------------
+
+async def test_degraded_onset_cleared_by_catch_all_exit_branch(env):
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {}
+
+    await db.set_state("degraded_since:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_onset:ping", datetime.now(timezone.utc).isoformat())
+    await db.set_state("degraded_cycles:ping", "4")
+
+    await main.run_monitor("ping", _results("ping", "unknown", message=""))
+
+    assert await db.get_state("degraded_onset:ping") == ""
