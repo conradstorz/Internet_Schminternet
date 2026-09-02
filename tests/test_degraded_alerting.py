@@ -99,6 +99,18 @@ async def test_minutes_threshold_crossed(env):
     assert call[0][0] == "ping"
     assert call[0][2] == ts
 
+    # Derive the expected duration string from this test's own seeded elapsed
+    # time (old_since was set 15 minutes before "now") and cycle count
+    # (seeded at "3", +1 for this poll), mirroring main.py's computation
+    # instead of hardcoding a value.
+    expected_cycles = 3 + 1
+    elapsed_minutes = (datetime.now(timezone.utc) - datetime.fromisoformat(old_since)).total_seconds() / 60
+    expected_duration = f"{int(elapsed_minutes)}m ({expected_cycles} polls)"
+    assert call[0][3] == expected_duration
+
+    expected_desc = "; ".join(r.message for r in _results("ping", "degraded", ts=ts) if r.message) or "No detail"
+    assert call[0][1] == expected_desc
+
     since = await db.get_state("degraded_since:ping")
     cycles = await db.get_state("degraded_cycles:ping")
     assert since == ts
@@ -168,7 +180,6 @@ async def test_no_thresholds_configured_tracks_state_without_alerting(env):
 
     for _ in range(3):
         await main.run_monitor("ping", _results("ping", "degraded"))
-        main._monitor_status["ping"] = "degraded"
 
     env.send_degraded_alert.assert_not_called()
     cycles = await db.get_state("degraded_cycles:ping")
@@ -192,8 +203,16 @@ async def test_degraded_to_down_clears_state_and_logs_event(env):
     assert await db.get_state("degraded_cycles:ping") == ""
 
     events = await db.get_events()
-    descriptions = [e["description"] for e in events]
-    assert any("degraded" in d and "down" in d for d in descriptions)
+    ping_events = [e for e in events if e["monitor"] == "ping"]
+    descriptions = [e["description"] for e in ping_events]
+
+    # The episode-end event (logged only when previous == "degraded", inside
+    # the new_status == "down" branch) has this exact, message-independent
+    # description. A status-pair assertion would not distinguish it from the
+    # down-alert's own event (previous_status/new_status are identical for
+    # both), so pin the literal string main.py writes.
+    assert "Status changed: degraded → down" in descriptions
+    assert len(ping_events) == 2
 
     env.send_degraded_alert.assert_not_called()
     env.send_alert.assert_called_once()
