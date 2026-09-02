@@ -31,7 +31,7 @@ async def env(tmp_path):
     alerter.send_alert = AsyncMock()
     alerter.send_recovery = AsyncMock()
     alerter.flush_alert_queue = AsyncMock()
-    alerter.send_degraded_alert = AsyncMock()
+    alerter.send_degraded_alert = AsyncMock(return_value=True)
     main._alerter = alerter
 
     yield alerter
@@ -335,3 +335,58 @@ async def test_restart_then_ok_clears_stale_degraded_keys(env):
     cycles = await db.get_state("degraded_cycles:ping")
     assert since == ""
     assert cycles == ""
+
+
+# ---------------------------------------------------------------------------
+# 14. send_degraded_alert returns False (cooldown-suppressed) — episode
+#     state must NOT be reset, so the clock keeps running toward the
+#     threshold instead of restarting it.
+# ---------------------------------------------------------------------------
+
+async def test_false_return_does_not_reset_episode_state(env):
+    env.send_degraded_alert = AsyncMock(return_value=False)
+
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {"degraded_alert_minutes": 10, "degraded_alert_cycles": None}
+
+    old_since = _iso(datetime.now(timezone.utc) - timedelta(minutes=15))
+    await db.set_state("degraded_since:ping", old_since)
+    await db.set_state("degraded_cycles:ping", "3")
+
+    ts = datetime.now(timezone.utc).isoformat()
+    await main.run_monitor("ping", _results("ping", "degraded", ts=ts))
+
+    env.send_degraded_alert.assert_called_once()
+
+    since = await db.get_state("degraded_since:ping")
+    cycles = await db.get_state("degraded_cycles:ping")
+    # Episode keeps its original onset time and keeps counting cycles up
+    # (3 seeded + 1 for this poll), rather than being reset to ts / "1".
+    assert since == old_since
+    assert cycles == "4"
+
+
+# ---------------------------------------------------------------------------
+# 15. send_degraded_alert returns True — reset still happens exactly as
+#     before (explicit contract test, distinct from the fixture default).
+# ---------------------------------------------------------------------------
+
+async def test_true_return_resets_episode_state(env):
+    env.send_degraded_alert = AsyncMock(return_value=True)
+
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {"degraded_alert_minutes": 10, "degraded_alert_cycles": None}
+
+    old_since = _iso(datetime.now(timezone.utc) - timedelta(minutes=15))
+    await db.set_state("degraded_since:ping", old_since)
+    await db.set_state("degraded_cycles:ping", "3")
+
+    ts = datetime.now(timezone.utc).isoformat()
+    await main.run_monitor("ping", _results("ping", "degraded", ts=ts))
+
+    env.send_degraded_alert.assert_called_once()
+
+    since = await db.get_state("degraded_since:ping")
+    cycles = await db.get_state("degraded_cycles:ping")
+    assert since == ts
+    assert cycles == "1"

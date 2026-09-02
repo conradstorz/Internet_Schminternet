@@ -147,3 +147,77 @@ async def test_send_degraded_alert_disabled():
         await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
     mock_smtp.assert_not_called()
     assert await db.get_pending_alerts() == []
+
+
+# ---------------------------------------------------------------------------
+# Degraded alerts — return value contract
+# ---------------------------------------------------------------------------
+
+async def test_send_degraded_alert_returns_true_on_success():
+    """Returns True when the email was actually sent."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", return_value=_mock_smtp_success()):
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    assert result is True
+
+
+async def test_send_degraded_alert_returns_true_on_enqueue():
+    """Returns True when the send failed but the alert was queued."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    assert result is True
+
+
+async def test_send_degraded_alert_returns_false_when_in_cooldown():
+    """Returns False when suppressed by an active cooldown."""
+    alerter = EmailAlerter(_cfg())
+    alerter._cooldowns["ping"] = datetime.now(timezone.utc)
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP") as mock_smtp:
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    mock_smtp.assert_not_called()
+    assert result is False
+
+
+async def test_send_degraded_alert_returns_false_when_disabled():
+    """Returns False when alerting is disabled."""
+    alerter = EmailAlerter(_cfg(enabled=False))
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP") as mock_smtp:
+        result = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    mock_smtp.assert_not_called()
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Degraded alerts — queue de-duplication
+# ---------------------------------------------------------------------------
+
+async def test_degraded_alert_dedups_identical_pending_subject():
+    """Two consecutive failed sends for the same monitor leave exactly one
+    row in alert_queue, and the second call still returns True."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        first = await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+        second = await alerter.send_degraded_alert("ping", "high latency", ts, "22m")
+    assert first is True
+    assert second is True
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+    assert rows[0]["subject"] == "[Schminternet] PING is DEGRADED"
+
+
+async def test_degraded_alert_dedup_keyed_on_subject_not_any_pending():
+    """A pending row for a different monitor (different subject) must not
+    suppress the enqueue for this monitor."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        await alerter.send_degraded_alert("dns", "high latency", ts, "12m")
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 2

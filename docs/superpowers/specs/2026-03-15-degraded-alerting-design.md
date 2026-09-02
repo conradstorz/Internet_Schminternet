@@ -248,3 +248,20 @@ async def send_degraded_alert(
 - Alert fires, timer resets: next immediate call (in cooldown) → no second alert
 - Restart with stale keys: pre-populate `degraded_since` and `degraded_cycles` in DB, verify stale timestamp is used (not reset to current time)
 - Disabled path smoke test: both thresholds null, monitor repeatedly degraded → no alert, no error
+
+---
+
+## Amendment — 2026-09-02: conditional reset + queue de-dup
+
+Post-review, two consequences of the original **unconditional** reset in §4 and §5 were found and fixed. This section documents the deviation so the spec above (§4's code block and §5's `send_degraded_alert` signature) no longer matches the code; the code is authoritative.
+
+**Problem observed:**
+- (a) `send_degraded_alert` returns silently when cooldown-suppressed, but the call site reset the episode timer regardless. A down alert followed by a drop to degraded meant the next threshold crossing was suppressed by the shared cooldown *and* the clock restarted anyway, roughly doubling the wait for the alert the user configured.
+- (b) A failed send correctly does not set the cooldown (queuing must keep working through an outage), but with no de-dup a multi-hour degraded episode at a short threshold queued dozens of near-identical emails, all delivered in a burst once SMTP recovered.
+
+**Fix:**
+- `send_degraded_alert()` now returns `bool` instead of `None`: `True` when an alert for the episode is now in flight (sent, queued, or an identical one already pending), `False` when nothing happened (disabled, or cooldown-suppressed).
+- Before enqueueing a failed send, `send_degraded_alert()` reads `db.get_pending_alerts()` and skips the enqueue if a pending row already has this exact subject — logged at debug level — and still returns `True` (the pending row already covers this episode).
+- The call site in `run_monitor()` resets `degraded_since` / `degraded_cycles` only when `send_degraded_alert()` returns truthy. When it returns `False`, the episode keeps accumulating and the alert goes out on the next poll after the cooldown expires.
+
+Everything else in §1–§4 is unchanged: thresholds are still truthiness-checked, the cooldown is still shared with `down` alerts and still checked only inside `EmailAlerter`, a failed send still does not set the cooldown, and `degraded → down` still logs both of its events.

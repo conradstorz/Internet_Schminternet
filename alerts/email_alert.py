@@ -106,13 +106,23 @@ class EmailAlerter:
         description: str,
         created_at: str,
         duration_str: str,
-    ) -> None:
-        """Emit a 'monitor is DEGRADED' email, respecting the cooldown window."""
+    ) -> bool:
+        """Emit a 'monitor is DEGRADED' email, respecting the cooldown window.
+
+        Returns True when an alert for this episode is now in flight — the
+        email was sent, was queued for later delivery, or an identical
+        degraded alert is already pending in the queue (in which case the
+        pending row already covers this episode, so nothing new is
+        enqueued). Returns False when nothing was done: alerting is
+        disabled, or the send was suppressed by the cooldown. Callers use
+        the return value to decide whether to reset the degraded-episode
+        timer.
+        """
         if not self._enabled():
-            return
+            return False
         if self._in_cooldown(monitor):
             logger.debug("Alert suppressed for %s (in cooldown)", monitor)
-            return
+            return False
 
         subject = f"[Schminternet] {monitor.upper()} is DEGRADED"
         body = (
@@ -125,8 +135,18 @@ class EmailAlerter:
         sent = await self._send(subject, body)
         if sent:
             self._cooldowns[monitor] = datetime.now(timezone.utc)
-        else:
-            await db.enqueue_alert(created_at, subject, body)
+            return True
+
+        pending = await db.get_pending_alerts()
+        if any(row["subject"] == subject for row in pending):
+            logger.debug(
+                "Degraded alert for %s already pending in queue; skipping enqueue",
+                monitor,
+            )
+            return True
+
+        await db.enqueue_alert(created_at, subject, body)
+        return True
 
     # ------------------------------------------------------------------
     # Helpers

@@ -276,10 +276,13 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             if minutes_hit or cycles_hit:
                 duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
                 desc = "; ".join(r.message for r in results if r.message) or "No detail"
-                await _alerter.send_degraded_alert(monitor_name, desc, ts, duration_str)
-                # Reset timer so full threshold must be crossed again after cooldown
-                await db.set_state(f"degraded_since:{monitor_name}", ts)
-                await db.set_state(f"degraded_cycles:{monitor_name}", "1")
+                alert_in_flight = await _alerter.send_degraded_alert(
+                    monitor_name, desc, ts, duration_str
+                )
+                if alert_in_flight:
+                    # Reset timer so full threshold must be crossed again after cooldown
+                    await db.set_state(f"degraded_since:{monitor_name}", ts)
+                    await db.set_state(f"degraded_cycles:{monitor_name}", "1")
 
     # SSE broadcast
     broadcast_status(
