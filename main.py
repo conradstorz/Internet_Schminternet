@@ -48,6 +48,12 @@ _led: Optional[LEDController] = None
 _alerter: Optional[EmailAlerter] = None
 
 
+async def _clear_degraded_state(monitor_name: str) -> None:
+    """Clear the degraded-episode state keys for a monitor (write "", not delete)."""
+    await db.set_state(f"degraded_since:{monitor_name}", "")
+    await db.set_state(f"degraded_cycles:{monitor_name}", "")
+
+
 # ---------------------------------------------------------------------------
 # Startup sequence
 # ---------------------------------------------------------------------------
@@ -180,8 +186,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                     }
                 )
             # Clear any degraded state
-            await db.set_state(f"degraded_since:{monitor_name}", "")
-            await db.set_state(f"degraded_cycles:{monitor_name}", "")
+            await _clear_degraded_state(monitor_name)
 
             # Existing down-alert path (previous != "down" is guaranteed by the
             # outer guard, since previous != new_status and new_status == "down")
@@ -214,8 +219,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
         elif new_status == "ok" and previous == "degraded":
             # Degraded resolved — clear state, log event, no alert
-            await db.set_state(f"degraded_since:{monitor_name}", "")
-            await db.set_state(f"degraded_cycles:{monitor_name}", "")
+            await _clear_degraded_state(monitor_name)
             await db.insert_event(
                 {
                     "timestamp": ts,
@@ -226,6 +230,12 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                     "new_status": "ok",
                 }
             )
+
+        elif new_status == "ok":
+            # Any other transition into ok (e.g. unknown → ok after a restart
+            # mid-episode): drop stale degraded state left over from before
+            # the restart so a future degraded episode doesn't inherit it.
+            await _clear_degraded_state(monitor_name)
 
         elif new_status == "degraded" and previous != "degraded":
             # Onset: log the transition event
