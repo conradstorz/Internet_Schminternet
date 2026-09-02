@@ -97,3 +97,53 @@ async def test_disabled_alerter_sends_nothing():
     with patch("smtplib.SMTP") as mock_smtp:
         await alerter.send_alert("ping", "down", "down", "ok", ts)
         mock_smtp.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Degraded alerts
+# ---------------------------------------------------------------------------
+
+async def test_send_degraded_alert_sends_email():
+    """A degraded alert is sent, sets the cooldown, and uses the DEGRADED subject."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    smtp = _mock_smtp_success()
+    with patch("smtplib.SMTP", return_value=smtp) as mock_smtp:
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    mock_smtp.assert_called_once()
+    assert "ping" in alerter._cooldowns
+    sent_message = smtp.sendmail.call_args.args[2]
+    assert "Subject: [Schminternet] PING is DEGRADED" in sent_message
+
+
+async def test_degraded_alert_respects_cooldown():
+    """A monitor already in cooldown gets no degraded email and nothing queued."""
+    alerter = EmailAlerter(_cfg())
+    alerter._cooldowns["ping"] = datetime.now(timezone.utc)
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP") as mock_smtp:
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    mock_smtp.assert_not_called()
+    assert await db.get_pending_alerts() == []
+
+
+async def test_degraded_alert_enqueues_on_failure():
+    """A failed degraded send is queued and must not set the cooldown."""
+    alerter = EmailAlerter(_cfg())
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("refused")):
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    rows = await db.get_pending_alerts()
+    assert len(rows) == 1
+    assert rows[0]["subject"] == "[Schminternet] PING is DEGRADED"
+    assert "ping" not in alerter._cooldowns
+
+
+async def test_send_degraded_alert_disabled():
+    """A disabled alerter neither sends nor queues a degraded alert."""
+    alerter = EmailAlerter(_cfg(enabled=False))
+    ts = datetime.now(timezone.utc).isoformat()
+    with patch("smtplib.SMTP") as mock_smtp:
+        await alerter.send_degraded_alert("ping", "high latency", ts, "12m")
+    mock_smtp.assert_not_called()
+    assert await db.get_pending_alerts() == []
