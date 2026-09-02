@@ -111,6 +111,7 @@ class EmailAlerter:
         if not self._enabled():
             return
         if self._in_cooldown(monitor):
+            logger.debug("Alert suppressed for %s (in cooldown)", monitor)
             return
 
         subject = f"[Schminternet] {monitor.upper()} is DEGRADED"

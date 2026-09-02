@@ -56,9 +56,10 @@ monitors:
 
   ip:
     interval_seconds: 300    # Check for IP changes every 5 minutes
-    # Degraded alerting (opt-in) — see the ping section above for details.
-    # degraded_alert_minutes: 30
-    # degraded_alert_cycles: 6
+    # ip's "degraded" is a momentary one-poll flag (set only on the single
+    # poll where the external IP changed; the next poll is back to "ok"), so
+    # sustained-degraded thresholds (degraded_alert_minutes / _cycles) can
+    # never be reached here and are intentionally not offered.
 
 database:
   path: "data/schminternet.db"

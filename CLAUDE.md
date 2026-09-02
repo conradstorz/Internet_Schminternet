@@ -46,7 +46,7 @@ There is no linter or formatter configured.
 - LED segments are keyed by monitor name in `leds.segments`; `leds.enabled: false` disables the strip on dev machines.
 
 **Alerting (`alerts/email_alert.py`) — read before touching:**
-- Alerts fire only on transitions **to and from `down`**; `degraded` transitions are currently silent. A design spec for degraded alerting is in `docs/superpowers/specs/2026-03-15-degraded-alerting-design.md` and is not yet implemented.
+- Alerts fire on transitions **to and from `down`**, and `degraded` transitions are now logged as `status_change` events. A sustained `degraded` episode sends an email once `degraded_alert_minutes` or `degraded_alert_cycles` (per-monitor, opt-in, both `None` by default — falsy means disabled) is crossed. Degraded alerts share the per-monitor cooldown with `down` alerts and are queued on send failure like any other alert; after a degraded alert fires, the episode timer resets so the full threshold must be crossed again. Design spec: `docs/superpowers/specs/2026-03-15-degraded-alerting-design.md`.
 - `_send()` returns a bool. Because SMTP is unreachable during exactly the outage being reported, a failed send is **queued** to the `alert_queue` table rather than dropped. The queue is drained on recovery (`down` → `ok`), at startup, and by the 5-minute flush job; failed retries bump `attempt_count`. Preserve this — a "down" notification must still arrive late rather than never.
 - Per-monitor cooldown (`cooldown_minutes`) suppresses repeat `down` alerts; a recovery clears it. The cooldown clock only starts on a *successful* send.
 - `send_best_effort()` bypasses both cooldown and queueing (used for the startup email).
@@ -63,7 +63,7 @@ Two `state` keys classify the previous stop: `shutdown_at` (written on clean SIG
 
 The dashboard loads Chart.js and Luxon from a CDN, so it degrades during the outages this tool exists to observe. Vendor them into `web/static/` if that matters.
 
-**SQLite (`storage/db.py`):** four tables — `metrics` (time-series), `events` (change log), `state` (key-value: `external_ip`, `shutdown_at`, `last_seen_at`), `alert_queue` (undelivered email). `storage/schema.sql` is documentation only; the authoritative DDL is the `_SCHEMA` string in `db.py`, so change both together. Every function opens its own short-lived `aiosqlite` connection; there is no shared pool. Module-level `_DB_PATH` is set by `db.configure(path)` — tests point it at `tmp_path`.
+**SQLite (`storage/db.py`):** four tables — `metrics` (time-series), `events` (change log), `state` (key-value: `external_ip`, `shutdown_at`, `last_seen_at`, `degraded_since:{monitor}`, `degraded_cycles:{monitor}`), `alert_queue` (undelivered email). The `degraded_since`/`degraded_cycles` keys are cleared by writing `""`, not by deleting the row. `storage/schema.sql` is documentation only; the authoritative DDL is the `_SCHEMA` string in `db.py`, so change both together. Every function opens its own short-lived `aiosqlite` connection; there is no shared pool. Module-level `_DB_PATH` is set by `db.configure(path)` — tests point it at `tmp_path`.
 
 **Tests:** `pytest.ini` sets `asyncio_mode = auto`, so async tests need no decorator. Tests import `main` directly (e.g. `_startup_sequence`), so keep `main.py` import-safe — no side effects outside `main()`.
 

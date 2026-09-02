@@ -315,3 +315,23 @@ async def test_restart_with_stale_keys_preserves_onset(env):
 
     events = await db.get_events()
     assert any(e["previous_status"] == "unknown" and e["new_status"] == "degraded" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# 13. Restart that comes back ok — stale degraded keys must be cleared
+# ---------------------------------------------------------------------------
+
+async def test_restart_then_ok_clears_stale_degraded_keys(env):
+    main._monitor_status["ping"] = "unknown"
+    main._monitor_configs["ping"] = {"degraded_alert_minutes": None, "degraded_alert_cycles": None}
+
+    stale_since = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
+    await db.set_state("degraded_since:ping", stale_since)
+    await db.set_state("degraded_cycles:ping", "5")
+
+    await main.run_monitor("ping", _results("ping", "ok", message=""))
+
+    since = await db.get_state("degraded_since:ping")
+    cycles = await db.get_state("degraded_cycles:ping")
+    assert since == ""
+    assert cycles == ""
