@@ -303,7 +303,7 @@ async def test_no_second_alert_immediately_after_reset(env):
 # 12. Restart with stale keys
 # ---------------------------------------------------------------------------
 
-async def test_restart_with_stale_keys_preserves_onset(env):
+async def test_restart_with_stale_keys_preserves_since(env):
     main._monitor_status["ping"] = "unknown"
     main._monitor_configs["ping"] = {"degraded_alert_minutes": None, "degraded_alert_cycles": None}
 
@@ -453,6 +453,12 @@ async def test_episode_since_stable_across_repeated_crossings(env):
     onset = await db.get_state("degraded_onset:ping")
     assert onset == episode_since_values[0]
 
+    since = await db.get_state("degraded_since:ping")
+    assert since != onset, (
+        "degraded_since must have advanced away from onset via the "
+        "reset-after-alert behavior, not stayed pinned to it"
+    )
+
 
 # ---------------------------------------------------------------------------
 # 18. degraded_onset cleared on degraded -> down
@@ -504,3 +510,46 @@ async def test_degraded_onset_cleared_by_catch_all_exit_branch(env):
     await main.run_monitor("ping", _results("ping", "unknown", message=""))
 
     assert await db.get_state("degraded_onset:ping") == ""
+
+
+# ---------------------------------------------------------------------------
+# 21. Onset backfill: an episode already in flight (degraded_since and
+#     degraded_cycles seeded, matching what an upgrade mid-episode looks
+#     like) but degraded_onset absent — the shape of a DB written before
+#     that key existed. The fallback read must backfill the key so episode
+#     identity stops drifting for the rest of the episode, not just avoid
+#     raising on the missing row.
+# ---------------------------------------------------------------------------
+
+async def test_onset_backfilled_when_missing_from_stale_episode(env):
+    main._monitor_status["ping"] = "degraded"
+    main._monitor_configs["ping"] = {"degraded_alert_minutes": None, "degraded_alert_cycles": 1}
+
+    seeded_since = _iso(datetime.now(timezone.utc) - timedelta(minutes=30))
+    await db.set_state("degraded_since:ping", seeded_since)
+    await db.set_state("degraded_cycles:ping", "5")
+    # degraded_onset intentionally left unset.
+
+    num_crossings = 4
+    for _ in range(num_crossings):
+        ts = datetime.now(timezone.utc).isoformat()
+        await main.run_monitor("ping", _results("ping", "degraded", ts=ts))
+
+    assert env.send_degraded_alert.call_count == num_crossings
+
+    # Backfilled on the first poll, equal to the pre-existing degraded_since.
+    onset = await db.get_state("degraded_onset:ping")
+    assert onset == seeded_since
+
+    # episode_since (5th positional arg) stays pinned to the backfilled onset
+    # on every call, even as degraded_since keeps advancing via the
+    # reset-after-alert behavior.
+    episode_since_values = [c.args[4] for c in env.send_degraded_alert.call_args_list]
+    assert len(set(episode_since_values)) == 1, (
+        "episode_since must be identical on every call once onset is "
+        f"backfilled; got {episode_since_values}"
+    )
+    assert episode_since_values[0] == seeded_since
+
+    since = await db.get_state("degraded_since:ping")
+    assert since != seeded_since
