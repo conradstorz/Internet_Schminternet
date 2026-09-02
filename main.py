@@ -267,18 +267,28 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
         monitor_cfg = _monitor_configs.get(monitor_name, {})
 
         since = await db.get_state(f"degraded_since:{monitor_name}") or ""
+        onset = await db.get_state(f"degraded_onset:{monitor_name}") or ""
         cycles = int(await db.get_state(f"degraded_cycles:{monitor_name}") or "0") + 1
 
         if not since:
             since = ts  # first degraded poll for this episode
-            # True episode onset — written only here, at episode start, and
-            # never touched again while the episode continues (unlike
-            # degraded_since above, which is deliberately reset to `ts` after
-            # each alert fires, since it also doubles as the threshold-window
-            # start). Kept as a separate key so the queue de-dup below can be
-            # scoped to the whole episode instead of drifting forward on
-            # every other alert.
-            await db.set_state(f"degraded_onset:{monitor_name}", ts)
+        if not onset:
+            # True episode onset — written only here, either at episode
+            # start (mirrors the `since` seed above) or as a backfill when a
+            # DB written before this key existed lands mid-episode (`since`
+            # already set, `onset` still empty). Never touched again while
+            # the episode continues (unlike degraded_since above, which is
+            # deliberately reset to `ts` after each alert fires, since it
+            # also doubles as the threshold-window start). Kept as a
+            # separate key so the queue de-dup below can be scoped to the
+            # whole episode instead of drifting forward on every other
+            # alert. Written before degraded_since below on purpose: a crash
+            # between the two writes leaves degraded_since empty, and the
+            # next poll re-seeds both from scratch — writing them in the
+            # reverse order would strand a stale onset paired with an empty
+            # since.
+            onset = since
+            await db.set_state(f"degraded_onset:{monitor_name}", onset)
 
         await db.set_state(f"degraded_since:{monitor_name}", since)
         await db.set_state(f"degraded_cycles:{monitor_name}", str(cycles))
@@ -294,11 +304,6 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             if minutes_hit or cycles_hit:
                 duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
                 desc = "; ".join(r.message for r in results if r.message) or "No detail"
-                # Guarded read: fall back to `since` when degraded_onset is
-                # empty or missing, so a DB written by an older version of
-                # this code (which never wrote degraded_onset) degrades
-                # gracefully instead of raising.
-                onset = await db.get_state(f"degraded_onset:{monitor_name}") or since
                 alert_in_flight = await _alerter.send_degraded_alert(
                     monitor_name, desc, ts, duration_str, onset
                 )

@@ -18,6 +18,9 @@ Binding requirements from the spec. These hold for every task.
 - **State keys are exactly** `degraded_since:{monitor}` (ISO-8601 UTC string)
   and `degraded_cycles:{monitor}` (integer as a string). Cleared by writing
   the empty string `""`, not by deleting the row.
+  > Superseded: a third key, `degraded_onset:{monitor}`, was added — see the
+  > corrected key table in the spec's "episode-onset key fix" amendment
+  > (`docs/superpowers/specs/2026-03-15-degraded-alerting-design.md`).
 - **Config keys are exactly** `degraded_alert_minutes` and
   `degraded_alert_cycles`, nested under `monitors.<name>` (siblings of
   `interval_seconds`, not inside `thresholds`). Both default to `None` in
