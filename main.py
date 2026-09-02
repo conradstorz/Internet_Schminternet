@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _monitor_status: dict[str, str] = {}
+_monitor_configs: dict[str, dict] = {}
 _led: Optional[LEDController] = None
 _alerter: Optional[EmailAlerter] = None
 
@@ -162,10 +163,28 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
     if _led:
         await _led.update_segment(monitor_name, new_status)
 
-    # Alert on state change
+    # ── Transition-based alerts ────────────────────────────────────────────
     if _alerter and previous != new_status:
         ts = results[0].timestamp
-        if new_status == "down" and previous != "down":
+        if new_status == "down":
+            if previous == "degraded":
+                # Log that the degraded episode ended (entered down)
+                await db.insert_event(
+                    {
+                        "timestamp": ts,
+                        "event_type": "status_change",
+                        "monitor": monitor_name,
+                        "description": "Status changed: degraded → down",
+                        "previous_status": "degraded",
+                        "new_status": "down",
+                    }
+                )
+            # Clear any degraded state
+            await db.set_state(f"degraded_since:{monitor_name}", "")
+            await db.set_state(f"degraded_cycles:{monitor_name}", "")
+
+            # Existing down-alert path (previous != "down" is guaranteed by the
+            # outer guard, since previous != new_status and new_status == "down")
             desc = "; ".join(r.message for r in results if r.message) or "No detail"
             await _alerter.send_alert(monitor_name, desc, new_status, previous, ts)
             await db.insert_event(
@@ -178,6 +197,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                     "new_status": new_status,
                 }
             )
+
         elif new_status == "ok" and previous == "down":
             await _alerter.send_recovery(monitor_name, "Connection restored", ts)
             await _alerter.flush_alert_queue()
@@ -191,6 +211,65 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
                     "new_status": new_status,
                 }
             )
+
+        elif new_status == "ok" and previous == "degraded":
+            # Degraded resolved — clear state, log event, no alert
+            await db.set_state(f"degraded_since:{monitor_name}", "")
+            await db.set_state(f"degraded_cycles:{monitor_name}", "")
+            await db.insert_event(
+                {
+                    "timestamp": ts,
+                    "event_type": "status_change",
+                    "monitor": monitor_name,
+                    "description": "Status recovered: degraded → ok",
+                    "previous_status": "degraded",
+                    "new_status": "ok",
+                }
+            )
+
+        elif new_status == "degraded" and previous != "degraded":
+            # Onset: log the transition event
+            await db.insert_event(
+                {
+                    "timestamp": ts,
+                    "event_type": "status_change",
+                    "monitor": monitor_name,
+                    "description": f"Status changed: {previous} → degraded",
+                    "previous_status": previous,
+                    "new_status": "degraded",
+                }
+            )
+
+    # ── Degraded accumulation (runs every poll where new_status == "degraded") ──
+    if _alerter and new_status == "degraded":
+        ts = results[0].timestamp
+        now = datetime.now(timezone.utc)
+        monitor_cfg = _monitor_configs.get(monitor_name, {})
+
+        since = await db.get_state(f"degraded_since:{monitor_name}") or ""
+        cycles = int(await db.get_state(f"degraded_cycles:{monitor_name}") or "0") + 1
+
+        if not since:
+            since = ts  # first degraded poll for this episode
+
+        await db.set_state(f"degraded_since:{monitor_name}", since)
+        await db.set_state(f"degraded_cycles:{monitor_name}", str(cycles))
+
+        threshold_minutes = monitor_cfg.get("degraded_alert_minutes")
+        threshold_cycles = monitor_cfg.get("degraded_alert_cycles")
+
+        if threshold_minutes or threshold_cycles:
+            elapsed_minutes = (now - datetime.fromisoformat(since)).total_seconds() / 60
+            minutes_hit = threshold_minutes and elapsed_minutes >= float(threshold_minutes)
+            cycles_hit = threshold_cycles and cycles >= int(threshold_cycles)
+
+            if minutes_hit or cycles_hit:
+                duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
+                desc = "; ".join(r.message for r in results if r.message) or "No detail"
+                await _alerter.send_degraded_alert(monitor_name, desc, ts, duration_str)
+                # Reset timer so full threshold must be crossed again after cooldown
+                await db.set_state(f"degraded_since:{monitor_name}", ts)
+                await db.set_state(f"degraded_cycles:{monitor_name}", "1")
 
     # SSE broadcast
     broadcast_status(
@@ -210,9 +289,10 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    global _led, _alerter
+    global _led, _alerter, _monitor_configs
 
     config = load_config()
+    _monitor_configs = config.get("monitors", {})
 
     # DB
     db_path = config.get("database", {}).get("path", "data/schminternet.db")
