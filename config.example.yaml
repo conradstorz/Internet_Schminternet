@@ -4,9 +4,17 @@
 
 monitors:
   ping:
+    # Deliberately disjoint from monitors.dns.servers below: if ping and DNS
+    # shared targets, one unreachable host would fail both monitors
+    # identically and neither result would be independent evidence.
     targets:
-      - "8.8.8.8"       # Google DNS
-      - "1.1.1.1"       # Cloudflare DNS
+      - "1.1.1.1"        # Cloudflare anycast — nearest PoP, the optimistic baseline.
+                          # A raw IP on purpose: the hostname targets below need DNS
+                          # to resolve before ICMP can even be sent, so if they fail
+                          # while this one stays healthy, that pattern points at a
+                          # DNS problem rather than a connectivity problem.
+      - "wikipedia.org"   # Popular site on real origin hosting (not a nearby CDN edge)
+      - "kernel.org"      # Less popular, longer path — exercises a different route
       # - "192.168.1.1" # Your router gateway (uncomment and adjust)
     interval_seconds: 30
     count: 5
@@ -21,10 +29,19 @@ monitors:
       loss_down_pct: 50
 
   dns:
+    # Deliberately disjoint from monitors.ping.targets above — see the note there.
     servers:
       - "8.8.8.8"    # Google DNS
-      - "1.1.1.1"    # Cloudflare DNS
+      - "9.9.9.9"    # Quad9 DNS
     test_domain: "google.com"
+    # A popular domain like google.com is cached by almost every resolver, so
+    # querying it verbatim every poll would just time a cache hit. With
+    # randomize_query left true (the default), a fresh random label is
+    # prefixed to the domain on every query (e.g. "a3f9c1d2.google.com"),
+    # which can never be cached — the resolver has to do real work. The
+    # resulting NXDOMAIN is expected and still counts as a successful, timed
+    # round trip. Set false to query test_domain verbatim instead.
+    randomize_query: true
     interval_seconds: 60
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_minutes: 5     # Minutes alone is enough; cycles may stay unset

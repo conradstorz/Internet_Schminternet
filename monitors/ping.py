@@ -73,7 +73,7 @@ def _ping_sync(target: str, count: int) -> tuple[Optional[float], float]:
 
 async def run(config: dict) -> list[MonitorResult]:
     cfg = config.get("monitors", {}).get("ping", {})
-    targets = cfg.get("targets", ["8.8.8.8", "1.1.1.1"])
+    targets = cfg.get("targets", ["1.1.1.1", "wikipedia.org", "kernel.org"])
     count = cfg.get("count", 5)
     thresholds = cfg.get("thresholds", {})
 

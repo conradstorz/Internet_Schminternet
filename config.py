@@ -10,7 +10,7 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "monitors": {
         "ping": {
-            "targets": ["8.8.8.8", "1.1.1.1"],
+            "targets": ["1.1.1.1", "wikipedia.org", "kernel.org"],
             "interval_seconds": 30,
             "count": 5,
             "degraded_alert_minutes": None,
@@ -23,8 +23,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
         "dns": {
-            "servers": ["8.8.8.8", "1.1.1.1"],
+            "servers": ["8.8.8.8", "9.9.9.9"],
             "test_domain": "google.com",
+            "randomize_query": True,
             "interval_seconds": 60,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
