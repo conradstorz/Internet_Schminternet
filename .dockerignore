@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.superpowers
+data
+*.db
+*.db-shm
+*.db-wal
+config.yaml
+Dockerfile
+.dockerignore
+docker-compose.yml
