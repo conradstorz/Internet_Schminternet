@@ -204,6 +204,21 @@ def test_unusable_rotation_settings_fall_back_and_warn(tmp_path, caplog):
     assert "logging.backup_count" in caplog.text
 
 
+def test_console_disabled_and_unusable_file_keeps_a_stream_handler(tmp_path, caplog):
+    """Never leave the service with nowhere to log — not even for this warning."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        _configure_logging(
+            _cfg(tmp_path, path=str(blocker / "sub" / "x.log"), console=False)
+        )
+
+    root = logging.getLogger()
+    assert [h for h in root.handlers if isinstance(h, logging.StreamHandler)] != []
+    assert "Could not" in caplog.text
+
+
 def test_unwritable_path_logs_warning_and_does_not_raise(tmp_path, caplog):
     blocker = tmp_path / "not_a_directory"
     blocker.write_text("blocking file", encoding="utf-8")
