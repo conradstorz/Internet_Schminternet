@@ -39,13 +39,17 @@ _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 
 # Console-only default so early failures (before config is loaded) are still
 # visible. _configure_logging() replaces this once config.yaml is read.
+_root_handlers_before_bootstrap = list(logging.getLogger().handlers)
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
 logger = logging.getLogger(__name__)
 
-# Handlers _configure_logging() has attached to the root logger — tracked so a
-# second call can remove exactly these (and only these) rather than stacking
-# duplicates or touching handlers other code (e.g. pytest's caplog) attached.
-_managed_handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+# Handlers this module attached to the root logger — tracked so a later call can
+# remove exactly these (and only these) rather than stacking duplicates or
+# closing handlers somebody else owns. basicConfig() is a no-op when logging is
+# already configured (an embedding app, pytest), so adopt only what it added.
+_managed_handlers: list[logging.Handler] = [
+    h for h in logging.getLogger().handlers if h not in _root_handlers_before_bootstrap
+]
 
 _NOISY_LOGGERS = ("httpx", "apscheduler.scheduler", "apscheduler.executors")
 

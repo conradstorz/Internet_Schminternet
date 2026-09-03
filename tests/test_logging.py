@@ -204,6 +204,18 @@ def test_unusable_rotation_settings_fall_back_and_warn(tmp_path, caplog):
     assert "logging.backup_count" in caplog.text
 
 
+def test_handlers_owned_by_other_code_are_left_alone(tmp_path):
+    """Only handlers this module attached may be removed — never somebody else's."""
+    foreign = logging.NullHandler()
+    root = logging.getLogger()
+    root.addHandler(foreign)
+    try:
+        _configure_logging(_cfg(tmp_path))
+        assert foreign in root.handlers
+    finally:
+        root.removeHandler(foreign)
+
+
 def test_console_disabled_and_unusable_file_keeps_a_stream_handler(tmp_path, caplog):
     """Never leave the service with nowhere to log — not even for this warning."""
     blocker = tmp_path / "blocker"
