@@ -231,6 +231,27 @@ def test_console_disabled_and_unusable_file_keeps_a_stream_handler(tmp_path, cap
     assert "Could not" in caplog.text
 
 
+def test_null_handler_does_not_count_as_somewhere_to_log(tmp_path, caplog):
+    """A NullHandler occupies root.handlers without emitting anything."""
+    blocker = tmp_path / "blocker2"
+    blocker.write_text("not a directory", encoding="utf-8")
+    null = logging.NullHandler()
+    root = logging.getLogger()
+    root.addHandler(null)
+    try:
+        with caplog.at_level(logging.WARNING, logger="main"):
+            _configure_logging(
+                _cfg(tmp_path, path=str(blocker / "sub" / "x.log"), console=False)
+            )
+        emitting = [
+            h for h in root.handlers
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.NullHandler)
+        ]
+        assert emitting != []
+    finally:
+        root.removeHandler(null)
+
+
 def test_unwritable_path_logs_warning_and_does_not_raise(tmp_path, caplog):
     blocker = tmp_path / "not_a_directory"
     blocker.write_text("blocking file", encoding="utf-8")
