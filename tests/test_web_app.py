@@ -150,3 +150,25 @@ def test_asset_version_survives_a_missing_static_dir(tmp_path, monkeypatch):
 
     monkeypatch.setattr(web_app, "_STATIC_DIR", tmp_path / "nope")
     assert web_app.asset_version() == "dev"
+
+
+# ---------------------------------------------------------------------------
+# External IP: metrics rows carry no message, so the address the ip monitor
+# found is only readable from the state table.
+# ---------------------------------------------------------------------------
+
+async def test_api_ip_returns_the_stored_address(client):
+    await db.init_db()
+    await db.set_state("external_ip", "203.0.113.7")
+
+    body = client.get("/api/ip").json()
+
+    assert body["ip"] == "203.0.113.7"
+
+
+async def test_api_ip_is_null_before_the_first_poll(client):
+    await db.init_db()
+
+    body = client.get("/api/ip").json()
+
+    assert body["ip"] is None

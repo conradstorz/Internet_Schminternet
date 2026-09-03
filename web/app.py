@@ -86,6 +86,17 @@ async def api_status() -> list[dict]:
     return await db.get_current_status()
 
 
+@app.get("/api/ip")
+async def api_ip() -> dict:
+    """The external address the ip monitor last saw.
+
+    Metrics rows carry no message column, so the address itself is not in
+    /api/status — the ip monitor stores it in the state table, and this is
+    where the dashboard reads it between SSE updates.
+    """
+    return {"ip": await db.get_state("external_ip")}
+
+
 @app.get("/api/metrics/{monitor}")
 async def api_metrics(monitor: str, hours: int = 24) -> list[dict]:
     return await db.query_recent(monitor, hours)

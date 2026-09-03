@@ -80,6 +80,13 @@ async function fetchStatus() {
     const rows = await res.json();
     applyStatusRows(rows);
 
+    // The address itself is not in /api/status — metrics rows have no message
+    // column — so read it from the state the ip monitor keeps.
+    const ipRes = await fetch("/api/ip");
+    const { ip } = await ipRes.json();
+    const ipVal = document.getElementById("val-ip");
+    if (ipVal && ip) ipVal.textContent = ip;
+
     document.getElementById("last-update").textContent =
       `Last updated ${new Date().toLocaleTimeString()}`;
     document.getElementById("live-dot").style.background = "var(--ok)";
