@@ -45,6 +45,16 @@ def _reset_logging():
         logging.getLogger(name).setLevel(level)
 
 
+def _file_handler() -> logging.handlers.RotatingFileHandler:
+    """The single rotating file handler attached to the root logger."""
+    handlers = [
+        h for h in logging.getLogger().handlers
+        if isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert len(handlers) == 1, handlers
+    return handlers[0]
+
+
 def _cfg(tmp_path, **overrides) -> dict:
     log_cfg = {
         "path": str(tmp_path / "schminternet.log"),
@@ -152,6 +162,47 @@ def test_console_default_keeps_stream_handler(tmp_path):
 # ---------------------------------------------------------------------------
 # 5. An unwritable path logs a warning and does not raise.
 # ---------------------------------------------------------------------------
+
+def test_null_logging_section_falls_back_to_defaults(tmp_path, monkeypatch, caplog):
+    """`logging:` with no body deep-merges to None — that must not crash startup."""
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        _configure_logging({"logging": None})  # must not raise
+
+    assert (tmp_path / "data" / "schminternet.log").exists()
+
+
+def test_non_dict_logging_section_is_ignored(tmp_path, monkeypatch, caplog):
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        _configure_logging({"logging": "verbose"})  # must not raise
+
+    assert "malformed logging config" in caplog.text
+    assert (tmp_path / "data" / "schminternet.log").exists()
+
+
+def test_numeric_strings_are_coerced_for_rotation_settings(tmp_path):
+    """YAML quoting is easy to get wrong; "5" should still rotate at 5 files."""
+    _configure_logging(_cfg(tmp_path, max_bytes="2048", backup_count="5"))
+
+    handler = _file_handler()
+    assert handler.maxBytes == 2048
+    assert handler.backupCount == 5
+
+
+def test_unusable_rotation_settings_fall_back_and_warn(tmp_path, caplog):
+    """`max_bytes: 10MB` would raise inside RotatingFileHandler — warn and carry on."""
+    with caplog.at_level(logging.WARNING, logger="main"):
+        _configure_logging(_cfg(tmp_path, max_bytes="10MB", backup_count=None))
+
+    handler = _file_handler()
+    assert handler.maxBytes == 10_000_000
+    assert handler.backupCount == 5
+    assert "logging.max_bytes" in caplog.text
+    assert "logging.backup_count" in caplog.text
+
 
 def test_unwritable_path_logs_warning_and_does_not_raise(tmp_path, caplog):
     blocker = tmp_path / "not_a_directory"

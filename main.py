@@ -54,6 +54,16 @@ _NAME_WIDTH = 9   # len("speedtest"), the longest monitor name
 _STATUS_WIDTH = 8  # len("degraded"), the longest status word
 
 
+def _int_setting(cfg: dict, key: str, default: int) -> int:
+    """Read an int from config, falling back to *default* on an unusable value."""
+    raw = cfg.get(key, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-numeric logging.%s=%r; using %d", key, raw, default)
+        return default
+
+
 def _configure_logging(cfg: dict) -> None:
     """Attach a rotating logfile (and, optionally, a console handler) per config.
 
@@ -64,13 +74,19 @@ def _configure_logging(cfg: dict) -> None:
     """
     global _managed_handlers
 
-    log_cfg = cfg.get("logging", {})
+    # `logging:` with no body deep-merges to None, and any scalar there would
+    # be a dict-shaped lookup on a non-dict — neither may take the service down.
+    log_cfg = cfg.get("logging") or {}
+    if not isinstance(log_cfg, dict):
+        logger.warning("Ignoring malformed logging config: %r", log_cfg)
+        log_cfg = {}
+
     path = log_cfg.get("path", "data/schminternet.log")
     level = getattr(logging, str(log_cfg.get("level", "INFO")).upper(), logging.INFO)
     if not isinstance(level, int):
         level = logging.INFO
-    max_bytes = log_cfg.get("max_bytes", 10_000_000)
-    backup_count = log_cfg.get("backup_count", 5)
+    max_bytes = _int_setting(log_cfg, "max_bytes", 10_000_000)
+    backup_count = _int_setting(log_cfg, "backup_count", 5)
     console = log_cfg.get("console", True)
 
     root = logging.getLogger()
@@ -98,7 +114,7 @@ def _configure_logging(cfg: dict) -> None:
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
         _managed_handlers.append(file_handler)
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
         logger.warning("Could not attach log file at %s: %s", path, exc)
 
     for noisy_name in _NOISY_LOGGERS:
