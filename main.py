@@ -115,6 +115,13 @@ def _configure_logging(cfg: dict) -> None:
         root.addHandler(file_handler)
         _managed_handlers.append(file_handler)
     except (OSError, TypeError, ValueError) as exc:
+        if not root.handlers:
+            # console: false plus an unusable log file would leave the service
+            # with nowhere to log at all — including this warning.
+            fallback = logging.StreamHandler()
+            fallback.setFormatter(formatter)
+            root.addHandler(fallback)
+            _managed_handlers.append(fallback)
         logger.warning("Could not attach log file at %s: %s", path, exc)
 
     for noisy_name in _NOISY_LOGGERS:
