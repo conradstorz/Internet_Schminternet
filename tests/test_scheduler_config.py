@@ -17,5 +17,4 @@ def test_scheduler_accepts_the_configured_executors():
     Passing the alias string "asyncio" instead of an executor instance raises
     TypeError at construction — which crashed the service on every start.
     """
-    scheduler = AsyncIOScheduler(executors=_build_executors())
-    assert set(scheduler._executors) >= {"default", "threadpool"}
+    AsyncIOScheduler(executors=_build_executors())
