@@ -10,12 +10,15 @@ Fallback:    icanhazip.com  (returns bare IP text, Cloudflare-backed)
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import httpx
 
 import storage.db as db
 from monitors.base import MonitorResult
+
+logger = logging.getLogger(__name__)
 
 _IP_PRIMARY = "https://api.ipify.org"
 _IP_FALLBACK = "https://icanhazip.com"
@@ -44,6 +47,7 @@ async def run(config: dict) -> list[MonitorResult]:
             await db.set_state(_STATE_KEY, current_ip)
 
         if ip_changed:
+            logger.warning("External IP changed: %s -> %s", previous_ip, current_ip)
             await db.insert_event(
                 {
                     "timestamp": ts,

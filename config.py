@@ -72,6 +72,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "alerts": {"email": {"enabled": False}},
+    "logging": {
+        "path": "data/schminternet.log",   # relative to the working directory
+        "level": "INFO",
+        "max_bytes": 10_000_000,           # rotate at ~10 MB
+        "backup_count": 5,                 # keep 5 rotated files
+        "console": True,                   # also log to stdout (docker logs / journald)
+    },
 }
 
 
