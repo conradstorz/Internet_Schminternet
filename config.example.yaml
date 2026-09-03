@@ -84,6 +84,13 @@ leds:
     ip:        [13, 13]
     overall:   [14, 15]
 
+logging:
+  path: "data/schminternet.log"  # rotating logfile; relative to the working directory
+  level: "INFO"
+  max_bytes: 10000000        # rotate at ~10 MB
+  backup_count: 5            # keep 5 rotated files
+  console: true               # also log to stdout (docker logs / journald)
+
 alerts:
   email:
     enabled: false            # Set true to enable email alerts

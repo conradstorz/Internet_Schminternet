@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import signal
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import uvicorn
+from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -31,12 +34,112 @@ from monitors import speedtest as speedtest_monitor
 from monitors.base import MonitorResult
 from web.app import app, broadcast_status
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
+
+# Console-only default so early failures (before config is loaded) are still
+# visible. _configure_logging() replaces this once config.yaml is read.
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
 logger = logging.getLogger(__name__)
+
+# Handlers _configure_logging() has attached to the root logger — tracked so a
+# second call can remove exactly these (and only these) rather than stacking
+# duplicates or touching handlers other code (e.g. pytest's caplog) attached.
+_managed_handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+
+_NOISY_LOGGERS = ("httpx", "apscheduler.scheduler", "apscheduler.executors")
+
+# Monitor-name / status-word column widths for the poll-summary log line.
+_NAME_WIDTH = 9   # len("speedtest"), the longest monitor name
+_STATUS_WIDTH = 8  # len("degraded"), the longest status word
+
+
+def _configure_logging(cfg: dict) -> None:
+    """Attach a rotating logfile (and, optionally, a console handler) per config.
+
+    Safe to call more than once: handlers previously attached by this function
+    are removed first, so repeated calls never stack duplicates. If the log
+    file can't be created (permissions, read-only mount), logs a warning and
+    carries on — a missing logfile must never stop the service.
+    """
+    global _managed_handlers
+
+    log_cfg = cfg.get("logging", {})
+    path = log_cfg.get("path", "data/schminternet.log")
+    level = getattr(logging, str(log_cfg.get("level", "INFO")).upper(), logging.INFO)
+    if not isinstance(level, int):
+        level = logging.INFO
+    max_bytes = log_cfg.get("max_bytes", 10_000_000)
+    backup_count = log_cfg.get("backup_count", 5)
+    console = log_cfg.get("console", True)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    for handler in _managed_handlers:
+        root.removeHandler(handler)
+        handler.close()
+    _managed_handlers = []
+
+    formatter = logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+
+    if console:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
+        _managed_handlers.append(console_handler)
+
+    try:
+        log_path = Path(path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            str(log_path), maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+        _managed_handlers.append(file_handler)
+    except OSError as exc:
+        logger.warning("Could not attach log file at %s: %s", path, exc)
+
+    for noisy_name in _NOISY_LOGGERS:
+        logging.getLogger(noisy_name).setLevel(logging.WARNING)
+
+
+def _format_metric(r: MonitorResult) -> str:
+    """Render one MonitorResult's metric compactly, e.g. "30.8ms" or "down 412.3 Mbps"."""
+    if r.value == -1.0:
+        rendered = "error"
+        if r.message:
+            rendered += f" ({r.message})"
+        return rendered
+    if r.metric in ("latency_ms", "resolution_ms", "response_ms"):
+        return f"{r.value:.1f}ms"
+    if r.metric == "packet_loss_pct":
+        return f"{int(r.value)}%" if r.value == int(r.value) else f"{r.value:.1f}%"
+    if r.metric == "download_mbps":
+        return f"down {r.value:.1f} Mbps"
+    if r.metric == "upload_mbps":
+        return f"up {r.value:.1f} Mbps"
+    if r.metric == "ip_changed":
+        return r.message
+    return f"{r.metric}={r.value:.1f}"
+
+
+def _format_results(results: list[MonitorResult]) -> str:
+    """Format a poll's results as compact per-target detail, e.g.
+
+    "8.8.8.8 30.8ms 0% | 1.1.1.1 26.1ms 0%"
+
+    Groups metrics by target, in the order targets first appear.
+    """
+    targets: dict[str, list[str]] = {}
+    order: list[str] = []
+    for r in results:
+        if r.target not in targets:
+            targets[r.target] = []
+            order.append(r.target)
+        targets[r.target].append(_format_metric(r))
+    return " | ".join(f"{target} {' '.join(targets[target])}" for target in order)
 
 # ---------------------------------------------------------------------------
 # Global shared state
@@ -53,6 +156,22 @@ async def _clear_degraded_state(monitor_name: str) -> None:
     await db.set_state(f"degraded_since:{monitor_name}", "")
     await db.set_state(f"degraded_cycles:{monitor_name}", "")
     await db.set_state(f"degraded_onset:{monitor_name}", "")
+
+
+# ---------------------------------------------------------------------------
+# Scheduler wiring
+# ---------------------------------------------------------------------------
+
+def _build_executors() -> dict[str, object]:
+    """Executors for the scheduler: async jobs on the loop, blocking work on threads.
+
+    Values must be executor instances (or `{"type": ...}` config dicts) — a bare
+    alias string such as `"asyncio"` is rejected by `AsyncIOScheduler.configure()`.
+    """
+    return {
+        "default": AsyncIOExecutor(),
+        "threadpool": ThreadPoolExecutor(max_workers=2),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -163,12 +282,28 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
         default="unknown",
     )
 
+    # Poll summary — one line per monitor per poll, INFO when ok, WARNING otherwise.
+    logger.log(
+        logging.INFO if new_status == "ok" else logging.WARNING,
+        "%-*s %-*s %s",
+        _NAME_WIDTH, monitor_name, _STATUS_WIDTH, new_status, _format_results(results),
+    )
+
     previous = _monitor_status.get(monitor_name, "unknown")
     _monitor_status[monitor_name] = new_status
 
     # LED update
     if _led:
         await _led.update_segment(monitor_name, new_status)
+
+    # Transition line — logged regardless of whether an alerter is configured
+    # (email alerting is opt-in; the operator still needs this in the logfile).
+    if previous != new_status:
+        logger.log(
+            logging.INFO if new_status == "ok" else logging.WARNING,
+            "EVENT %s %s -> %s",
+            monitor_name, previous, new_status,
+        )
 
     # ── Transition-based alerts ────────────────────────────────────────────
     if _alerter and previous != new_status:
@@ -333,6 +468,7 @@ async def main() -> None:
     global _led, _alerter, _monitor_configs
 
     config = load_config()
+    _configure_logging(config)
     _monitor_configs = config.get("monitors", {})
 
     # DB
@@ -362,11 +498,7 @@ async def main() -> None:
     # but doesn't need to pass it as an APScheduler job argument.
     # ---------------------------------------------------------------------------
 
-    executors = {
-        "default":    "asyncio",
-        "threadpool": ThreadPoolExecutor(max_workers=2),
-    }
-    scheduler = AsyncIOScheduler(executors=executors)
+    scheduler = AsyncIOScheduler(executors=_build_executors())
 
     async def job_ping() -> None:
         await run_monitor("ping", await ping.run(config))
