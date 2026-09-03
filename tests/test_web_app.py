@@ -111,3 +111,42 @@ async def test_api_events_no_params_defaults_to_50(client):
     res = client.get("/api/events")
     assert res.status_code == 200
     assert len(res.json()) == 3
+
+
+# ---------------------------------------------------------------------------
+# Asset cache-busting: a deployed change must reach the browser without the
+# user having to force-reload.
+# ---------------------------------------------------------------------------
+
+def test_index_script_url_is_versioned(client):
+    body = client.get("/").text
+    assert "/static/main.js?v=" in body
+    assert '/static/main.js"' not in body
+
+
+def test_index_is_not_cached(client):
+    """A cached page would keep serving the previous asset version after a deploy."""
+    assert client.get("/").headers["cache-control"] == "no-store"
+
+
+def test_asset_version_changes_when_a_static_file_changes(tmp_path, monkeypatch):
+    import web.app as web_app
+
+    static = tmp_path / "static"
+    static.mkdir()
+    asset = static / "main.js"
+    asset.write_text("console.log(1)", encoding="utf-8")
+    monkeypatch.setattr(web_app, "_STATIC_DIR", static)
+
+    before = web_app.asset_version()
+    asset.write_text("console.log(2) // longer content", encoding="utf-8")
+    after = web_app.asset_version()
+
+    assert before != after
+
+
+def test_asset_version_survives_a_missing_static_dir(tmp_path, monkeypatch):
+    import web.app as web_app
+
+    monkeypatch.setattr(web_app, "_STATIC_DIR", tmp_path / "nope")
+    assert web_app.asset_version() == "dev"
