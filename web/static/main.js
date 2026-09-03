@@ -188,7 +188,68 @@ function clusterMarkers(events, thresholdPx = 10) {
   return clusters;
 }
 
-const Dashboard = { percentile, clampSeries, clusterMarkers };
+/**
+ * Downsample a time series into evenly-spaced time buckets so a wide window
+ * of dense samples (e.g. 24 h of ping data) can be plotted legibly. Pure —
+ * no DOM.
+ *
+ * Buckets span the points' own [min x, max x] range, divided into `buckets`
+ * equal-width intervals. Each non-empty bucket becomes one output point at
+ * the bucket's midpoint, carrying the bucket's mean (`y`) and its max value
+ * (`max`) plus the timestamp that max occurred at (`maxX`) — so a spike can
+ * still be flagged and its true time reported even after aggregation.
+ * Empty buckets produce no point, leaving an honest gap in the line.
+ *
+ *   bucketSeries(points, { buckets }) -> [{ x, y, max, maxX, count }]
+ */
+function bucketSeries(points, { buckets = 180 } = {}) {
+  if (!points.length) return [];
+
+  const toMs = (x) => (x instanceof Date ? x.getTime() : x);
+  const xs = points.map((p) => toMs(p.x));
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const span = maxX - minX || 1;
+  const width = span / buckets;
+
+  const bins = new Array(buckets);
+  for (let i = 0; i < points.length; i++) {
+    const t = xs[i];
+    const y = points[i].y;
+    let idx = Math.floor((t - minX) / width);
+    if (idx >= buckets) idx = buckets - 1;
+    if (idx < 0) idx = 0;
+
+    let bin = bins[idx];
+    if (!bin) {
+      bin = { sum: 0, count: 0, max: -Infinity, maxT: t };
+      bins[idx] = bin;
+    }
+    bin.sum += y;
+    bin.count += 1;
+    if (y > bin.max) {
+      bin.max = y;
+      bin.maxT = t;
+    }
+  }
+
+  const result = [];
+  for (let i = 0; i < buckets; i++) {
+    const bin = bins[i];
+    if (!bin) continue; // empty bucket -> honest gap, no point emitted
+    const center = minX + (i + 0.5) * width;
+    result.push({
+      x: new Date(center),
+      y: bin.sum / bin.count,
+      max: bin.max,
+      maxX: new Date(bin.maxT),
+      count: bin.count,
+    });
+  }
+  return result;
+}
+
+const Dashboard = { percentile, clampSeries, clusterMarkers, bucketSeries };
 if (typeof window !== "undefined") window.Dashboard = Dashboard;
 
 // ---------------------------------------------------------------------------
@@ -215,19 +276,38 @@ const CHART_BASE_OPTIONS = {
   plugins: { legend: { display: false } },
 };
 
+/**
+ * Colours for a multi-target chart. Targets are user-configurable, so
+ * colours are drawn from a small fixed palette by index rather than
+ * hard-coded per known host — chosen to stay distinguishable on the dark
+ * dashboard background.
+ */
+const SERIES_PALETTE = [
+  "#38bdf8", // sky
+  "#f472b6", // pink
+  "#34d399", // green
+  "#fbbf24", // amber
+  "#a78bfa", // violet
+  "#22d3ee", // cyan
+  "#f97316", // orange
+];
+
+/** Roughly one plotted point per 2-3 px, clamped to a sane range. */
+function chartBucketCount(pixelWidth) {
+  return Math.max(50, Math.min(300, Math.round(pixelWidth / 2.5)));
+}
+
 async function buildChart(canvasId, monitor, metric, color, { clamp = false } = {}) {
   try {
     const res  = await fetch(`/api/metrics/${monitor}?hours=24`);
     const rows = await res.json();
 
-    const raw = rows
-      .filter((r) => r.metric === metric && r.value >= 0)
-      .map((r) => ({ x: new Date(r.timestamp), y: r.value }));
-
+    const filtered = rows.filter((r) => r.metric === metric && r.value >= 0);
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
 
     if (!clamp) {
+      const raw = filtered.map((r) => ({ x: new Date(r.timestamp), y: r.value }));
       new Chart(canvas, {
         type: "line",
         data: {
@@ -248,10 +328,55 @@ async function buildChart(canvasId, monitor, metric, color, { clamp = false } = 
       return;
     }
 
-    // Ping / DNS: an outage spike must not flatten the rest of the series —
-    // clamp the y-axis to a p95-based ceiling and mark clipped points.
-    const { ceiling, points } = Dashboard.clampSeries(raw);
+    // Ping / DNS: one dataset per target (rows interleave targets, so a
+    // single merged series zig-zags between hosts) — grouped, downsampled
+    // into buckets, and clamped to a p95-based ceiling shared across all
+    // targets so an outage spike can't flatten the rest of the chart.
     const CLIP_COLOR = "#ef4444"; // var(--down)
+
+    const byTarget = new Map();
+    for (const r of filtered) {
+      const list = byTarget.get(r.target) || [];
+      list.push({ x: new Date(r.timestamp), y: r.value });
+      byTarget.set(r.target, list);
+    }
+    const targets = [...byTarget.keys()].sort();
+
+    // Ceiling computed across all targets together so every series shares
+    // one comparable y-axis.
+    const allPoints = filtered.map((r) => ({ x: new Date(r.timestamp), y: r.value }));
+    const { ceiling } = Dashboard.clampSeries(allPoints);
+
+    const wrapperWidth = canvas.parentElement?.clientWidth || 400;
+    const bucketCount = chartBucketCount(wrapperWidth);
+
+    const datasets = targets.map((target, i) => {
+      const seriesColor = SERIES_PALETTE[i % SERIES_PALETTE.length];
+      const buckets = Dashboard.bucketSeries(byTarget.get(target), { buckets: bucketCount });
+      const points = buckets.map((b) => {
+        const clipped = b.max > ceiling;
+        return {
+          x: b.x,
+          y: clipped ? ceiling : b.y,
+          clipped,
+          trueValue: clipped ? b.max : b.y,
+          trueTime: clipped ? b.maxX : b.x,
+        };
+      });
+
+      return {
+        label: target,
+        data: points,
+        borderColor: seriesColor,
+        backgroundColor: seriesColor + "25",
+        borderWidth: 1.5,
+        pointRadius: points.map((p) => (p.clipped ? 4 : 0)),
+        pointBackgroundColor: points.map((p) => (p.clipped ? CLIP_COLOR : seriesColor)),
+        pointBorderColor: points.map((p) => (p.clipped ? CLIP_COLOR : seriesColor)),
+        fill: false,
+        tension: 0.3,
+      };
+    });
 
     const options = {
       ...CHART_BASE_OPTIONS,
@@ -265,15 +390,19 @@ async function buildChart(canvasId, monitor, metric, color, { clamp = false } = 
         },
       },
       plugins: {
-        legend: { display: false },
+        legend: {
+          display: true,
+          labels: { color: "#94a3b8", boxWidth: 12, font: { size: 11 } },
+        },
         tooltip: {
           callbacks: {
             label(ctx) {
-              const p = points[ctx.dataIndex];
-              const time = new Date(p.x).toLocaleTimeString([], { hour12: false });
+              const p = ctx.raw;
+              const name = ctx.dataset.label;
+              const time = new Date(p.trueTime).toLocaleTimeString([], { hour12: false });
               return p.clipped
-                ? `${Math.round(p.trueValue)} ms — ${time}`
-                : `${Math.round(p.trueValue)} ms`;
+                ? `${name}: ${Math.round(p.trueValue)} ms — ${time}`
+                : `${name}: ${Math.round(p.trueValue)} ms`;
             },
           },
         },
@@ -282,21 +411,7 @@ async function buildChart(canvasId, monitor, metric, color, { clamp = false } = 
 
     new Chart(canvas, {
       type: "line",
-      data: {
-        datasets: [
-          {
-            data: points,
-            borderColor: color,
-            backgroundColor: color + "25",
-            borderWidth: 1.5,
-            pointRadius: points.map((p) => (p.clipped ? 4 : 0)),
-            pointBackgroundColor: points.map((p) => (p.clipped ? CLIP_COLOR : color)),
-            pointBorderColor: points.map((p) => (p.clipped ? CLIP_COLOR : color)),
-            fill: true,
-            tension: 0.3,
-          },
-        ],
-      },
+      data: { datasets },
       options,
     });
   } catch (err) {
@@ -420,8 +535,44 @@ function renderTimelineMarkers(track, events, start, end) {
   }
 }
 
+/** Hour tick marks + labels along the bottom of the timeline strip. */
+function renderTimelineTicks(ticksEl, start, end) {
+  if (!ticksEl) return;
+  ticksEl.innerHTML = "";
+
+  const width = ticksEl.clientWidth || 1;
+  const spanMs = end.getTime() - start.getTime() || 1;
+  const TICK_SPACING_MS = 2 * 60 * 60 * 1000; // every 2 h, so labels don't collide at this width
+
+  // First tick at the earliest even hour >= start.
+  const first = new Date(start);
+  first.setMinutes(0, 0, 0);
+  if (first < start) first.setHours(first.getHours() + 1);
+  if (first.getHours() % 2 !== 0) first.setHours(first.getHours() + 1);
+
+  for (let t = first.getTime(); t <= end.getTime(); t += TICK_SPACING_MS) {
+    const frac = (t - start.getTime()) / spanMs;
+    if (frac < 0 || frac > 1) continue;
+    const x = frac * width;
+
+    const tick = document.createElement("div");
+    tick.className = "timeline-tick";
+    tick.style.left = `${x}px`;
+    ticksEl.appendChild(tick);
+
+    const label = document.createElement("div");
+    label.className = "timeline-tick-label";
+    label.style.left = `${x}px`;
+    label.textContent = new Date(t).toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    ticksEl.appendChild(label);
+  }
+}
+
 async function loadTimeline() {
   const track = document.getElementById("timeline-track");
+  const ticks = document.getElementById("timeline-ticks");
   const empty = document.getElementById("timeline-empty");
   if (!track) return;
 
@@ -443,6 +594,7 @@ async function loadTimeline() {
 
   timelineCache = { events, start, end };
   renderTimelineMarkers(track, events, start, end);
+  renderTimelineTicks(ticks, start, end);
   if (empty) empty.hidden = events.length > 0;
 }
 
@@ -524,6 +676,7 @@ function initTimeline() {
   window.addEventListener("resize", () => {
     if (timelineCache.start) {
       renderTimelineMarkers(track, timelineCache.events, timelineCache.start, timelineCache.end);
+      renderTimelineTicks(document.getElementById("timeline-ticks"), timelineCache.start, timelineCache.end);
     }
   });
 
