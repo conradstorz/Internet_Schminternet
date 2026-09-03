@@ -112,7 +112,7 @@ def _format_metric(r: MonitorResult) -> str:
         if r.message:
             rendered += f" ({r.message})"
         return rendered
-    if r.metric in ("latency_ms", "resolution_ms", "response_ms"):
+    if r.metric in ("latency_ms", "resolution_ms", "response_ms", "ping_ms"):
         return f"{r.value:.1f}ms"
     if r.metric == "packet_loss_pct":
         return f"{int(r.value)}%" if r.value == int(r.value) else f"{r.value:.1f}%"

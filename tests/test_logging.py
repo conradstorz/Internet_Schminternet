@@ -217,6 +217,14 @@ def test_format_results_speedtest_download_and_upload():
     assert _format_results(results) == "speedtest down 412.3 Mbps up 35.2 Mbps"
 
 
+def test_format_results_speedtest_ping_metric_renders_as_milliseconds():
+    """speedtest reports latency as ping_ms — it is a duration like the others."""
+    results = [
+        _mr(monitor="speedtest", target="speedtest", metric="ping_ms", value=25.0),
+    ]
+    assert _format_results(results) == "speedtest 25.0ms"
+
+
 def test_format_results_ip_change():
     results = [
         _mr(monitor="ip", target="external", metric="ip_changed", value=1.0, status="degraded", message="71.62.10.4"),
@@ -239,10 +247,11 @@ def test_format_results_error_sentinel_without_message():
 
 
 def test_format_results_unknown_metric():
+    """A metric no monitor emits today falls back to metric=value."""
     results = [
-        _mr(monitor="speedtest", target="speedtest", metric="ping_ms", value=1.5),
+        _mr(monitor="speedtest", target="speedtest", metric="jitter", value=1.5),
     ]
-    assert _format_results(results) == "speedtest ping_ms=1.5"
+    assert _format_results(results) == "speedtest jitter=1.5"
 
 
 # ---------------------------------------------------------------------------
