@@ -68,6 +68,80 @@ async def test_get_current_status_groups_by_monitor_metric():
     assert "packet_loss_pct" in metrics
 
 
+async def test_get_events_range_returns_only_rows_inside_window():
+    await db.init_db()
+    await db.insert_event({
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "before window", "previous_status": "ok", "new_status": "down",
+    })
+    await db.insert_event({
+        "timestamp": "2026-01-02T12:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "inside window", "previous_status": "down", "new_status": "ok",
+    })
+    await db.insert_event({
+        "timestamp": "2026-01-05T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "after window", "previous_status": "ok", "new_status": "down",
+    })
+    rows = await db.get_events_range(
+        "2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"
+    )
+    assert len(rows) == 1
+    assert rows[0]["description"] == "inside window"
+
+
+async def test_get_events_range_ordered_oldest_first():
+    await db.init_db()
+    await db.insert_event({
+        "timestamp": "2026-01-02T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "second", "previous_status": "ok", "new_status": "down",
+    })
+    await db.insert_event({
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "first", "previous_status": "ok", "new_status": "down",
+    })
+    rows = await db.get_events_range(
+        "2026-01-01T00:00:00+00:00", "2026-01-03T00:00:00+00:00"
+    )
+    assert [r["description"] for r in rows] == ["first", "second"]
+
+
+async def test_get_events_range_respects_cap():
+    await db.init_db()
+    for i in range(10):
+        await db.insert_event({
+            "timestamp": f"2026-01-01T00:00:{i:02d}+00:00",
+            "event_type": "status_change", "monitor": "ping",
+            "description": f"event{i}", "previous_status": "ok", "new_status": "down",
+        })
+    rows = await db.get_events_range(
+        "2026-01-01T00:00:00+00:00", "2026-01-01T00:01:00+00:00", limit=5
+    )
+    assert len(rows) == 5
+
+
+async def test_get_events_range_boundaries_inclusive():
+    await db.init_db()
+    await db.insert_event({
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "at start", "previous_status": "ok", "new_status": "down",
+    })
+    await db.insert_event({
+        "timestamp": "2026-01-02T00:00:00+00:00",
+        "event_type": "status_change", "monitor": "ping",
+        "description": "at end", "previous_status": "ok", "new_status": "down",
+    })
+    rows = await db.get_events_range(
+        "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
+    )
+    assert {r["description"] for r in rows} == {"at start", "at end"}
+
+
 async def test_state_get_set():
     await db.init_db()
     assert await db.get_state("external_ip") is None

@@ -141,6 +141,25 @@ async def get_events(limit: int = 50) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def get_events_range(start: str, end: str, limit: int = 1000) -> list[dict]:
+    """Return events with ``start <= timestamp <= end``, oldest first.
+
+    ``start``/``end`` are ISO-8601 UTC timestamp strings, compared as text
+    against the stored ``timestamp`` column (the same convention already used
+    elsewhere in this module). Capped at ``limit`` rows to bound response size
+    for a caller panning across a large history.
+    """
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM events WHERE timestamp >= ? AND timestamp <= ? "
+            "ORDER BY timestamp ASC LIMIT ?",
+            (start, end, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
 async def get_state(key: str) -> Optional[str]:
     async with aiosqlite.connect(_DB_PATH) as db:
         cursor = await db.execute("SELECT value FROM state WHERE key = ?", (key,))

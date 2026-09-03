@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Internet Schminternet</title>
 
-  <!-- HTMX for the events-table live refresh -->
-  <script src="https://unpkg.com/htmx.org@1.9.12" crossorigin="anonymous"></script>
-
   <!-- Chart.js + Luxon time-axis adapter (served from CDN; cached after first load) -->
   <script src="https://cdn.jsdelivr.net/npm/luxon@3.5.0/build/global/luxon.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
@@ -116,15 +113,76 @@
     }
     .events-card h3 { font-size: 0.875rem; font-weight: 600; margin-bottom: 0.75rem; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th {
-      text-align: left; padding: 0.4rem 0.75rem;
-      color: var(--muted); font-weight: 500;
-      border-bottom: 1px solid var(--border);
+    /* ── Events timeline ── */
+    .timeline-controls {
+      display: flex; align-items: center; gap: 0.5rem;
+      margin-bottom: 0.75rem; flex-wrap: wrap;
     }
-    td { padding: 0.4rem 0.75rem; border-bottom: 1px solid rgba(51,65,85,.4); }
-    tr:last-child td { border-bottom: none; }
-    .no-events { color: var(--muted); text-align: center; padding: 1.5rem; }
+    .timeline-controls button {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 0.4rem; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer;
+    }
+    .timeline-controls button:hover { border-color: var(--muted); }
+    .timeline-range { color: var(--muted); font-size: 0.78rem; margin-left: auto; }
+    .timeline-range.live::before    { content: "LIVE — ";       color: var(--ok);       font-weight: 700; }
+    .timeline-range.historical::before { content: "HISTORICAL — "; color: var(--degraded); font-weight: 700; }
+
+    .timeline-wrapper {
+      position: relative;
+      height: 70px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      overflow: hidden;
+      cursor: grab;
+      user-select: none;
+      touch-action: pan-y;
+    }
+    .timeline-wrapper.dragging { cursor: grabbing; }
+
+    .timeline-axis {
+      position: absolute; left: 0; right: 0; top: 50%;
+      height: 1px; background: var(--border);
+    }
+    .timeline-track { position: absolute; inset: 0; }
+
+    .timeline-marker {
+      position: absolute; top: 50%; width: 10px; height: 10px;
+      border-radius: 50%; transform: translate(-50%, -50%);
+      border: 2px solid var(--surface);
+      cursor: pointer;
+    }
+    .timeline-marker.cluster {
+      width: 18px; height: 18px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.6rem; font-weight: 700; color: var(--bg);
+    }
+
+    .timeline-empty {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 0.8rem;
+    }
+    .timeline-empty[hidden] { display: none; }
+
+    .timeline-tooltip {
+      position: fixed;
+      z-index: 50;
+      max-width: 280px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.78rem;
+      line-height: 1.4;
+      box-shadow: 0 4px 16px rgba(0,0,0,.4);
+      pointer-events: none;
+    }
+    .timeline-tooltip .tt-event + .tt-event {
+      margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border);
+    }
+    .timeline-tooltip .tt-time { color: var(--muted); }
+    .timeline-tooltip .tt-transition { font-weight: 600; }
   </style>
 </head>
 <body>
@@ -198,16 +256,22 @@
 
   </div>
 
-  <!-- ── Events log (HTMX-polled) ── -->
+  <!-- ── Events timeline (12 h pannable window) ── -->
   <div class="events-card">
-    <h3>Recent Events</h3>
-    <div
-      id="events-body"
-      hx-get="/partials/events"
-      hx-trigger="load, every 30s"
-      hx-swap="innerHTML"
-    >Loading…</div>
+    <h3>Events Timeline</h3>
+    <div class="timeline-controls">
+      <button id="tl-back" type="button">&larr; Back 12h</button>
+      <button id="tl-now" type="button">Now</button>
+      <button id="tl-forward" type="button">Forward 12h &rarr;</button>
+      <span id="tl-range" class="timeline-range live"></span>
+    </div>
+    <div class="timeline-wrapper" id="timeline-wrapper">
+      <div class="timeline-axis"></div>
+      <div class="timeline-track" id="timeline-track"></div>
+      <div class="timeline-empty" id="timeline-empty" hidden>No events in this window.</div>
+    </div>
   </div>
+  <div class="timeline-tooltip" id="timeline-tooltip" hidden></div>
 
   <script src="/static/main.js"></script>
 </body>
