@@ -109,7 +109,23 @@
     .quality-swatch {
       width: 34px; height: 16px; border-radius: 0.3rem;
       border: 1px solid rgba(255,255,255,0.15);
+      /* Matches the hardware strip's breathe (leds/animation.py): the same
+         70%-100% swing over the same 4 s period, so the preview looks like
+         the thing it previews. Liveness only — never severity. */
+      animation: quality-breathe 4s ease-in-out infinite;
     }
+    @keyframes quality-breathe {
+      0%, 100% { filter: brightness(1); }
+      50%      { filter: brightness(0.7); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .quality-swatch { animation: none; }
+    }
+    /* Set on #quality-strip (not each swatch) so it also covers swatches
+       rendered after the connection drops — see main.js's SSE onerror/onopen,
+       which toggles this class. A preview that keeps breathing while the
+       backend is dead would assert liveness it cannot know. */
+    #quality-strip.stalled .quality-swatch { animation-play-state: paused; }
     .quality-block-label {
       font-size: 0.62rem; font-weight: 600; letter-spacing: 0.03em;
       text-transform: uppercase; color: var(--muted);

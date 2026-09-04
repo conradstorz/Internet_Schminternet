@@ -210,3 +210,21 @@ def test_api_quality_defaults_empty_before_any_poll(client):
 
     assert body["scores"] == {}
     assert body["ranking"] == []
+
+
+class TestQualityStripPreviewBreathes:
+    def test_swatches_carry_the_breathe_animation(self, client):
+        html = client.get("/").text
+        assert "@keyframes quality-breathe" in html
+        assert "animation: quality-breathe 4s ease-in-out infinite" in html
+        assert "filter: brightness(1)" in html
+        assert "filter: brightness(0.7)" in html
+
+    def test_breathe_respects_reduced_motion(self, client):
+        html = client.get("/").text
+        assert "prefers-reduced-motion: reduce" in html
+
+    def test_stalled_connection_pauses_the_breathe(self, client):
+        html = client.get("/").text
+        assert "#quality-strip.stalled .quality-swatch" in html
+        assert "animation-play-state: paused" in html

@@ -71,6 +71,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "weights": {"ping": 1.0, "dns": 1.0, "http": 1.0, "speedtest": 0.25},
         "orientation": "top_down",  # or "bottom_up" — matches physical mounting
         "overall": True,            # show a combined-score slot at the bottom end
+        # Gentle "breathe" so the strip visibly moves between polls — a
+        # still strip is indistinguishable from a crashed service. It
+        # encodes liveness only, never severity: colour already carries
+        # quality. See leds/animation.py.
+        "animation": {
+            "enabled": True,
+            "period_seconds": 4.0,   # one full swell-and-dip
+            "min_brightness": 0.7,   # dimmest point, as a fraction of `brightness`
+            "fps": 25,
+        },
     },
     "alerts": {"email": {"enabled": False}},
     "logging": {

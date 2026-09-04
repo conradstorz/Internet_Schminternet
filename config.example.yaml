@@ -116,6 +116,18 @@ leds:
                                # top under bottom_up.
   overall: true                # Show a combined-score slot at the bottom end of the
                                 # strip (does not participate in the ranking/sorting).
+  animation:
+    # A gentle brightness "breathe" so the strip visibly moves between
+    # polls. Between a ping poll (30 s) and a speedtest (30 min) the strip
+    # would otherwise sit perfectly still, which looks exactly like a
+    # crashed service or a powered-off Pi. The animation is a liveness
+    # signal only — it is identical on every slot regardless of score,
+    # because colour already tells you the quality.
+    enabled: true
+    period_seconds: 4.0      # seconds for one full swell-and-dip cycle
+    min_brightness: 0.7      # dimmest point as a FRACTION of `brightness` above,
+                             # not an absolute value — 0.7 means 70% of 0.4
+    fps: 25                  # animation frames per second
 
 logging:
   path: "data/schminternet.log"  # rotating logfile; relative to the working directory

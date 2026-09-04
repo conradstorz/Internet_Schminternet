@@ -84,6 +84,12 @@ class TestLEDControllerNoOp:
         await ctl.set_all((0, 0, 0))
         await ctl.blackout()
 
+    def test_base_brightness_derives_from_configured_fraction(self):
+        # leds.brightness is a 0.0-1.0 fraction of full strip brightness;
+        # _base_brightness is the 0-255 int the hardware actually wants.
+        ctl = LEDController({"enabled": False, "count": 12, "brightness": 0.4})
+        assert ctl._base_brightness == 102
+
 
 # ---------------------------------------------------------------------------
 # render_quality's ranking/colour logic, verified against a fake strip.
@@ -98,12 +104,18 @@ class _FakeStrip:
     def __init__(self, count: int) -> None:
         self.pixels: list[tuple[int, int, int]] = [(0, 0, 0)] * count
         self.shown = False
+        self.show_count = 0
+        self.brightness_values: list[int] = []
 
     def setPixelColor(self, index: int, color: tuple[int, int, int]) -> None:
         self.pixels[index] = color
 
+    def setBrightness(self, value: int) -> None:
+        self.brightness_values.append(value)
+
     def show(self) -> None:
         self.shown = True
+        self.show_count += 1
 
 
 def _fake_color(r: int, g: int, b: int) -> tuple[int, int, int]:
@@ -179,3 +191,113 @@ class TestRenderQuality:
         second_pass = list(strip.pixels)
 
         assert first_pass == second_pass
+
+
+# ---------------------------------------------------------------------------
+# Breathe animation — the daemon thread that modulates brightness between
+# polls. render_quality still paints the pixels itself; the thread only
+# calls setBrightness + show.
+#
+# Test configs use a deliberately short period and high fps so a handful of
+# frames land inside a fraction of a second of wall clock.
+# ---------------------------------------------------------------------------
+
+import time
+
+_ANIM_ON = {"enabled": True, "period_seconds": 0.2, "min_brightness": 0.5, "fps": 50}
+_ANIM_OFF = {"enabled": False, "period_seconds": 4.0, "min_brightness": 0.7, "fps": 25}
+
+
+class TestAnimationDisabled:
+    async def test_no_thread_is_started(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_OFF})
+        _wire_fake_strip(ctl)
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        assert ctl._anim_thread is None
+        await ctl.blackout()
+
+    async def test_render_shows_exactly_once(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_OFF})
+        strip = _wire_fake_strip(ctl)
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        assert strip.show_count == 1
+        assert strip.brightness_values == []
+        await ctl.blackout()
+
+    async def test_config_without_an_animation_key_behaves_as_before(self):
+        # The pre-existing tests pass no "animation" key at all; that must
+        # keep meaning "no animation", not "default on".
+        ctl = LEDController({"enabled": False, "count": 12})
+        strip = _wire_fake_strip(ctl)
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        assert ctl._anim_thread is None
+        assert strip.show_count == 1
+
+
+class TestAnimationEnabled:
+    async def test_thread_starts_lazily_on_first_render(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_ON})
+        _wire_fake_strip(ctl)
+        assert ctl._anim_thread is None  # nothing spins before the first poll
+
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        assert ctl._anim_thread is not None
+        assert ctl._anim_thread.is_alive()
+        await ctl.blackout()
+
+    async def test_second_render_does_not_start_a_second_thread(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_ON})
+        _wire_fake_strip(ctl)
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        first = ctl._anim_thread
+        await ctl.render_quality({"ping": 0.5}, overall=0.5)
+        assert ctl._anim_thread is first
+        await ctl.blackout()
+
+    async def test_brightness_is_modulated_within_the_configured_band(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_ON})
+        ctl._base_brightness = 200
+        strip = _wire_fake_strip(ctl)
+
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        time.sleep(0.35)  # ~1.75 cycles at a 0.2 s period
+        await ctl.blackout()
+
+        values = strip.brightness_values
+        assert len(values) > 5, f"expected many frames, got {values}"
+        assert min(values) >= round(200 * 0.5)
+        assert max(values) <= 200
+        # It must actually move, not sit at one level.
+        assert len(set(values)) > 1
+
+    async def test_ranking_colours_are_still_painted_with_the_animator_running(self):
+        ctl = LEDController({
+            "enabled": False, "count": 12, "orientation": "top_down",
+            "overall": False, "animation": _ANIM_ON,
+        })
+        strip = _wire_fake_strip(ctl)
+
+        await ctl.render_quality({"ping": 0.9, "dns": 0.1, "http": 0.5}, overall=0.5)
+        assert strip.pixels[0] == quality_color(0.9)
+        assert strip.pixels[4] == quality_color(0.5)
+        assert strip.pixels[8] == quality_color(0.1)
+        await ctl.blackout()
+
+
+class TestBlackoutStopsTheAnimator:
+    async def test_blackout_joins_the_thread_and_leaves_pixels_off(self):
+        ctl = LEDController({"enabled": False, "count": 12, "animation": _ANIM_ON})
+        strip = _wire_fake_strip(ctl)
+        await ctl.render_quality({"ping": 0.9}, overall=0.9)
+        time.sleep(0.05)
+
+        await ctl.blackout()
+
+        assert not ctl._anim_thread.is_alive()
+        assert all(p == (0, 0, 0) for p in strip.pixels)
+
+        # No further writes after blackout returns — the animator must not
+        # repaint over the shutdown blackout.
+        settled = strip.show_count
+        time.sleep(0.1)
+        assert strip.show_count == settled

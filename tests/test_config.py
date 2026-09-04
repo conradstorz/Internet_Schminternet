@@ -115,3 +115,33 @@ def test_degraded_alert_minutes_override(tmp_path):
     assert ping["degraded_alert_minutes"] == 10
     assert ping["degraded_alert_cycles"] is None
     assert ping["thresholds"] == DEFAULT_CONFIG["monitors"]["ping"]["thresholds"]
+
+
+class TestLedAnimationDefaults:
+    def test_animation_defaults_are_present(self):
+        from config import DEFAULT_CONFIG
+
+        animation = DEFAULT_CONFIG["leds"]["animation"]
+        assert animation["enabled"] is True
+        assert animation["period_seconds"] == 4.0
+        assert animation["min_brightness"] == 0.7
+        assert animation["fps"] == 25
+
+    def test_user_config_can_override_one_animation_key(self, tmp_path):
+        # Deep merge: overriding period_seconds must leave the other
+        # animation keys at their defaults rather than replacing the dict.
+        from config import load_config
+
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "leds:\n"
+            "  animation:\n"
+            "    period_seconds: 10.0\n",
+            encoding="utf-8",
+        )
+        config = load_config(str(path))
+        animation = config["leds"]["animation"]
+        assert animation["period_seconds"] == 10.0
+        assert animation["min_brightness"] == 0.7
+        assert animation["fps"] == 25
+        assert animation["enabled"] is True
