@@ -101,8 +101,35 @@
       border-radius: 0.75rem;
       padding: 1.2rem;
     }
-    .chart-card h3 { font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 0.75rem; }
-    .chart-wrapper { position: relative; height: 190px; }
+    .chart-card h3 { font-size: 0.8rem; font-weight: 600; color: var(--muted); margin: 0; }
+    .chart-wrapper { position: relative; height: 190px; margin-top: 0.75rem; }
+
+    .chart-card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.5rem; flex-wrap: wrap;
+    }
+
+    .chart-style-control {
+      display: flex; gap: 0.25rem; flex-wrap: wrap;
+    }
+    .chart-style-control button {
+      background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+      border-radius: 0.35rem; padding: 0.2rem 0.55rem; font-size: 0.7rem;
+      font-weight: 600; cursor: pointer; line-height: 1.4;
+    }
+    .chart-style-control button:hover { color: var(--text); border-color: var(--muted); }
+    .chart-style-control button:focus-visible {
+      outline: 2px solid var(--measuring); outline-offset: 1px;
+    }
+    .chart-style-control button.active {
+      background: var(--measuring); border-color: var(--measuring); color: #fff;
+    }
+
+    .chart-note {
+      font-size: 0.7rem; color: var(--muted); font-style: italic;
+      margin-top: 0.5rem;
+    }
+    .chart-note[hidden] { display: none; }
 
     /* ── Events log ── */
     .events-card {
@@ -252,13 +279,33 @@
   <div class="charts-grid">
 
     <div class="chart-card">
-      <h3>Ping Latency — 24 h</h3>
+      <div class="chart-card-head">
+        <h3>Ping Latency — 24 h</h3>
+        <div class="chart-style-control" id="style-ping" role="group" aria-label="Ping chart style">
+          <button type="button" data-style="clamped" aria-pressed="true">Clamped</button>
+          <button type="button" data-style="log" aria-pressed="false">Log</button>
+          <button type="button" data-style="band" aria-pressed="false">Min–Max</button>
+          <button type="button" data-style="heatmap" aria-pressed="false">Heatmap</button>
+          <button type="button" data-style="scatter" aria-pressed="false">Scatter</button>
+        </div>
+      </div>
       <div class="chart-wrapper"><canvas id="chart-ping"></canvas></div>
+      <div class="chart-note" id="note-ping" hidden></div>
     </div>
 
     <div class="chart-card">
-      <h3>DNS Resolution Time — 24 h</h3>
+      <div class="chart-card-head">
+        <h3>DNS Resolution Time — 24 h</h3>
+        <div class="chart-style-control" id="style-dns" role="group" aria-label="DNS chart style">
+          <button type="button" data-style="clamped" aria-pressed="true">Clamped</button>
+          <button type="button" data-style="log" aria-pressed="false">Log</button>
+          <button type="button" data-style="band" aria-pressed="false">Min–Max</button>
+          <button type="button" data-style="heatmap" aria-pressed="false">Heatmap</button>
+          <button type="button" data-style="scatter" aria-pressed="false">Scatter</button>
+        </div>
+      </div>
       <div class="chart-wrapper"><canvas id="chart-dns"></canvas></div>
+      <div class="chart-note" id="note-dns" hidden></div>
     </div>
 
     <div class="chart-card">
