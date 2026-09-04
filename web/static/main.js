@@ -178,8 +178,18 @@ function connectSSE() {
       `Live update ${new Date().toLocaleTimeString()}`;
   };
 
+  es.onopen = () => {
+    // The connection is back — let the quality-strip preview breathe again.
+    document.getElementById("quality-strip")?.classList.remove("stalled");
+  };
+
   es.onerror = () => {
     document.getElementById("live-dot").style.background = "var(--degraded)";
+    // Freeze the LED quality-strip preview's breathe while we have no live
+    // connection: the breathe exists to signal "the backend is alive", and
+    // letting it keep running with a dead /stream would assert liveness the
+    // browser has no way to actually know.
+    document.getElementById("quality-strip")?.classList.add("stalled");
     es.close();
     setTimeout(connectSSE, 5000);   // auto-reconnect after 5 s
   };

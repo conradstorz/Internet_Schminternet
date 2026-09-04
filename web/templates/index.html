@@ -115,12 +115,17 @@
       animation: quality-breathe 4s ease-in-out infinite;
     }
     @keyframes quality-breathe {
-      0%, 100% { opacity: 1; }
-      50%      { opacity: 0.7; }
+      0%, 100% { filter: brightness(1); }
+      50%      { filter: brightness(0.7); }
     }
     @media (prefers-reduced-motion: reduce) {
       .quality-swatch { animation: none; }
     }
+    /* Set on #quality-strip (not each swatch) so it also covers swatches
+       rendered after the connection drops — see main.js's SSE onerror/onopen,
+       which toggles this class. A preview that keeps breathing while the
+       backend is dead would assert liveness it cannot know. */
+    #quality-strip.stalled .quality-swatch { animation-play-state: paused; }
     .quality-block-label {
       font-size: 0.62rem; font-weight: 600; letter-spacing: 0.03em;
       text-transform: uppercase; color: var(--muted);

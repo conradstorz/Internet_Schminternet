@@ -84,6 +84,12 @@ class TestLEDControllerNoOp:
         await ctl.set_all((0, 0, 0))
         await ctl.blackout()
 
+    def test_base_brightness_derives_from_configured_fraction(self):
+        # leds.brightness is a 0.0-1.0 fraction of full strip brightness;
+        # _base_brightness is the 0-255 int the hardware actually wants.
+        ctl = LEDController({"enabled": False, "count": 12, "brightness": 0.4})
+        assert ctl._base_brightness == 102
+
 
 # ---------------------------------------------------------------------------
 # render_quality's ranking/colour logic, verified against a fake strip.
