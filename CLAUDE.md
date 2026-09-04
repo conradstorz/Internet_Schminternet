@@ -33,7 +33,7 @@ There is no linter or formatter configured.
 
 **Per-poll data flow:**
 1. A scheduler job calls `monitors/<name>.run(config)` → `list[MonitorResult]` (`monitors/base.py`)
-2. `run_monitor()` in `main.py` persists them (`storage/db.py`), collapses them to one status per monitor ("worst wins": `down` > `degraded` > `ok` > `unknown`), updates the LED segment, fires alerts on transition, and pushes an SSE payload via `web.app.broadcast_status`
+2. `run_monitor()` in `main.py` persists them (`storage/db.py`), collapses them to one status per monitor ("worst wins": `down` > `degraded` > `ok` > `unknown`), rescores every monitor seen so far and re-renders the rank-sorted LED strip, fires alerts on transition, and pushes an SSE payload via `web.app.broadcast_status`
 
 **Scheduled jobs** (`main.py`): the five monitors on their configured intervals, plus `cleanup` (cron 03:00, retention purge + VACUUM), `heartbeat` (60 s, writes `last_seen_at`), and `alert_flush` (5 min, retries queued email). Ping/DNS/HTTP/IP also fire once immediately at startup — speedtest deliberately does not.
 
@@ -43,7 +43,7 @@ There is no linter or formatter configured.
 - Ping and DNS fan out across their targets with `asyncio.gather`, so total poll time is one target's latency, not the sum. `tests/test_monitor_concurrency.py` asserts this with wall-clock timing.
 - Each monitor exposes a pure `_determine_status(...)` tested directly in `tests/test_thresholds.py`.
 - Config is deep-merged: `config.yaml` (gitignored) overlays `DEFAULT_CONFIG` in `config.py`, so user config only holds overrides.
-- LED segments are keyed by monitor name in `leds.segments`; `leds.enabled: false` disables the strip on dev machines.
+- LEDs are a rank-sorted quality strip, not fixed per-monitor segments: `leds/quality.py` scores each monitor (ping, dns, http, speedtest — `ip` excluded) 0.0-1.0 from its own configured thresholds via a shared piecewise-linear curve, `overall_score()` combines them with `leds.weights` (speedtest weighted low — it only runs every 30 min), and `quality_color()` maps score to hue (120° green -> 0° red). `leds/controller.py` sorts best-first, stable on ties, and paints contiguous slots sized as evenly as `leds.count` allows, greenest nearest the top (`leds.orientation`, `top_down`/`bottom_up`) with an optional `leds.overall` slot at the bottom end excluded from sorting. `leds.enabled: false` disables the strip on dev machines; `GET /api/quality` and the dashboard's compact strip preview make the ranking observable without hardware.
 
 **Alerting (`alerts/email_alert.py`) — read before touching:**
 - Alerts fire on transitions **to and from `down`**, and `degraded` transitions are now logged as `status_change` events. A sustained `degraded` episode sends an email once `degraded_alert_minutes` or `degraded_alert_cycles` (per-monitor, opt-in, both `None` by default — falsy means disabled) is crossed. Degraded alerts share the per-monitor cooldown with `down` alerts and are queued on send failure like any other alert. `run_monitor()` tracks a `degraded` episode with three `state` keys: `degraded_since:{monitor}` (the current threshold-window start — reset to the event timestamp after every alert that fires, since it also gates the minutes/cycles check), `degraded_cycles:{monitor}` (poll count in the current window, reset to `"1"` alongside it), and `degraded_onset:{monitor}` (the true episode start — written once, only when the episode begins, and never touched again while it continues). `send_degraded_alert()` takes an `episode_since` argument — `run_monitor()` passes `degraded_onset` (falling back to `degraded_since` if the onset key is empty or missing, so a DB written by older code degrades gracefully) — and returns `bool` — `True` when an alert for the episode is now in flight (sent, queued, or an identical one is already pending **for this same episode**), `False` when nothing happened (disabled or cooldown-suppressed) — and `run_monitor()` resets the threshold window (`degraded_since`/`degraded_cycles`, **not** `degraded_onset`) **only when that return value is truthy**. A cooldown-suppressed call therefore leaves the clock running instead of restarting it. The queue de-dup is episode-scoped, not subject-only: a failed send is skipped only when a pending row has the same subject *and* its `created_at` is at or after `episode_since` (plain string comparison — all these timestamps are `datetime.now(timezone.utc).isoformat()` strings in one fixed format); a pending row from an older, already-ended episode does **not** suppress a new episode's enqueue. Because `episode_since` is now the stable onset rather than the threshold window (which drifts forward after every alert), exactly one row stays queued per episode, no matter how many times the threshold is re-crossed. Design spec: `docs/superpowers/specs/2026-03-15-degraded-alerting-design.md`.
@@ -59,6 +59,7 @@ Two `state` keys classify the previous stop: `shutdown_at` (written on clean SIG
 - `GET /api/metrics/{monitor}?hours=24` — time-series for one monitor
 - `GET /api/events?limit=50` — status-change/IP-change/startup event log
 - `GET /partials/events` — same data as a Jinja fragment
+- `GET /api/quality` — the rank-sorted LED strip's current scores, overall score, ranked order and hex colours; lets the strip be verified without hardware
 - `GET /stream` — SSE; one JSON object (`monitor`, `status`, `results[]`) per poll cycle, 15 s keepalive comments, per-client bounded queue that drops on overflow
 
 The dashboard loads Chart.js and Luxon from a CDN, so it degrades during the outages this tool exists to observe. Vendor them into `web/static/` if that matters.
@@ -70,7 +71,7 @@ The dashboard loads Chart.js and Luxon from a CDN, so it degrades during the out
 **Adding a monitor:**
 1. `monitors/your_monitor.py` with `async def run(config) -> list[MonitorResult]` and a pure `_determine_status(...)`
 2. Register a closure-wrapped job in `main.py`'s scheduler block
-3. Add defaults to `DEFAULT_CONFIG` and an LED segment in `config.example.yaml`
+3. Add defaults to `DEFAULT_CONFIG`; if it should appear on the LED strip, add a `score_monitor` branch and a `leds.weights` entry in `config.example.yaml`
 4. Add threshold tests to `tests/test_thresholds.py`
 
 ## Deployment

@@ -92,14 +92,30 @@ leds:
   pin: 18                    # GPIO18 (PWM0) — disable onboard audio if conflict
   count: 16                  # Total number of LEDs on your strip
   brightness: 0.4            # 0.0 – 1.0
-  segments:
-    # Each value is [first_led_index, last_led_index] (inclusive, 0-based)
-    ping:      [0, 3]
-    dns:       [4, 6]
-    http:      [7, 9]
-    speedtest: [10, 12]
-    ip:        [13, 13]
-    overall:   [14, 15]
+  # Rank-sorted quality strip: `leds.segments` (fixed per-monitor index
+  # ranges) is gone. Instead every scored monitor gets a slot sized as
+  # evenly as `count` allows, and slots are re-sorted on every poll —
+  # greenest (best score) nearest the top, reddest nearest the bottom. A
+  # fixed mapping made no sense once the strip re-orders itself, and the
+  # owner never has to edit index ranges when adding/removing a monitor.
+  # "ip" is never scored or slotted — an address change is an event, not a
+  # measure of connection quality — so it never appears on the strip.
+  weights:
+    # Used by overall_score() to combine each monitor's 0.0-1.0 score into
+    # one number for the optional "overall" slot below. speedtest is
+    # deliberately downweighted: it only runs every 30 min (see
+    # monitors.speedtest.interval_seconds), so a stale or failed run should
+    # tint the overall colour rather than dominate it.
+    ping: 1.0
+    dns: 1.0
+    http: 1.0
+    speedtest: 0.25
+  orientation: top_down       # or "bottom_up" — matches how the strip is physically
+                               # mounted, so the owner never has to rewire it. Index 0
+                               # is the top under top_down; the highest index is the
+                               # top under bottom_up.
+  overall: true                # Show a combined-score slot at the bottom end of the
+                                # strip (does not participate in the ranking/sorting).
 
 logging:
   path: "data/schminternet.log"  # rotating logfile; relative to the working directory

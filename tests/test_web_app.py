@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import storage.db as db
-from web.app import app
+from web.app import app, set_quality_snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +172,41 @@ async def test_api_ip_is_null_before_the_first_poll(client):
     body = client.get("/api/ip").json()
 
     assert body["ip"] is None
+
+
+# ---------------------------------------------------------------------------
+# /api/quality — the rank-sorted LED strip's state, readable without hardware.
+# ---------------------------------------------------------------------------
+
+def test_api_quality_returns_scores_ranking_and_colors(client):
+    set_quality_snapshot(
+        {
+            "scores": {"ping": 0.94, "http": 0.71, "dns": 0.55, "speedtest": 0.10},
+            "overall": 0.72,
+            "ranking": ["ping", "http", "dns", "speedtest"],
+            "colors": {
+                "ping": "#7fff00",
+                "http": "#...placeholder",
+                "dns": "#...placeholder",
+                "speedtest": "#ff0000",
+                "overall": "#...placeholder",
+            },
+        }
+    )
+
+    body = client.get("/api/quality").json()
+
+    assert body["ranking"] == ["ping", "http", "dns", "speedtest"]
+    assert body["scores"]["ping"] == 0.94
+    assert body["overall"] == 0.72
+    assert body["colors"]["speedtest"] == "#ff0000"
+    assert "overall" in body["colors"]
+
+
+def test_api_quality_defaults_empty_before_any_poll(client):
+    set_quality_snapshot({"scores": {}, "overall": 0.0, "ranking": [], "colors": {}})
+
+    body = client.get("/api/quality").json()
+
+    assert body["scores"] == {}
+    assert body["ranking"] == []

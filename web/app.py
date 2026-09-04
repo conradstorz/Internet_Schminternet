@@ -64,6 +64,21 @@ def broadcast_status(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LED quality snapshot — set by main.py's run_monitor() on every poll so the
+# rank-sorted strip is observable from /api/quality even where there's no
+# hardware to look at (main.py can't be imported here without a cycle, since
+# it already imports `app` from this module — so it pushes state in instead).
+# ---------------------------------------------------------------------------
+
+_quality_snapshot: dict = {"scores": {}, "overall": 0.0, "ranking": [], "colors": {}}
+
+
+def set_quality_snapshot(snapshot: dict) -> None:
+    global _quality_snapshot
+    _quality_snapshot = snapshot
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -84,6 +99,17 @@ async def index(request: Request) -> HTMLResponse:
 @app.get("/api/status")
 async def api_status() -> list[dict]:
     return await db.get_current_status()
+
+
+@app.get("/api/quality")
+async def api_quality() -> dict:
+    """The rank-sorted LED strip's current state: each scored monitor's
+    score, the combined overall score, the ranked (best-first) order, and
+    every one's colour as `#rrggbb` hex — the same data the strip itself
+    would show, readable without hardware. Empty/zeroed until the first poll
+    of at least one scored monitor completes.
+    """
+    return _quality_snapshot
 
 
 @app.get("/api/ip")

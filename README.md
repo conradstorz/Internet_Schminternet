@@ -17,7 +17,7 @@ connection and displays the status on a WS2812B LED strip and a local web dashbo
 
 Results are stored in a local SQLite database and shown on:
 - A dark-themed web dashboard at `http://pi-address:8080`
-- A WS2812B addressable LED strip (colour-coded by status)
+- A WS2812B addressable LED strip (rank-sorted, green-to-red by quality score)
 - SMTP email alerts on state transitions
 
 ---
@@ -80,7 +80,8 @@ Key settings to review:
 - `monitors.speedtest.expected_download_mbps` — your expected plan speed
 - `leds.enabled` — set `true` when LED strip is connected
 - `leds.count` — total number of LEDs on your strip
-- `leds.segments` — tweak index ranges to match your strip layout
+- `leds.orientation` — `top_down` (index 0 = top) or `bottom_up`, to match how the strip is physically mounted
+- `leds.weights` — per-monitor weight used to combine scores into the `overall` slot's colour
 - `alerts.email` — SMTP credentials (use a Gmail **App Password**, not your account password)
 
 ### 4. Test manually
@@ -145,13 +146,28 @@ pytest tests/
 
 ## LED colour key
 
-| Status | Colour |
+The strip is **rank-sorted**, not fixed per-monitor: every scored monitor
+(ping, DNS, HTTP, speedtest — `ip` is excluded, since an address change is an
+event, not a measure of quality) gets a slot sized as evenly as `leds.count`
+allows, and the slots re-sort on every poll, best score nearest the top
+(`leds.orientation: top_down`, or the highest index under `bottom_up`). An
+optional `overall` slot (`leds.overall: true`) sits at the bottom end showing
+the combined, weighted score and never participates in the sorting.
+
+Each slot's colour is a continuous **green-to-red gradient**, not one of a
+few fixed states — a monitor's 0.0 (unusable) to 1.0 (perfect) score maps to
+hue 120° (green) through yellow and orange down to 0° (pure red):
+
+| Score | Colour |
 |---|---|
-| OK | Green |
-| Degraded | Amber |
-| Down | Red |
-| Measuring | Blue |
-| Unknown | Dim white |
+| 1.0 | Green |
+| ~0.6 | Yellow |
+| ~0.2 | Orange |
+| 0.0 | Pure red — remote access is gone |
+
+No hardware? `GET /api/quality` returns the same scores, ranking, and hex
+colours the strip would show, and the dashboard renders a compact preview
+row in the same ranked order.
 
 ---
 

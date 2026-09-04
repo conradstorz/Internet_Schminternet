@@ -63,14 +63,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pin": 18,
         "count": 16,
         "brightness": 0.4,
-        "segments": {
-            "ping": [0, 3],
-            "dns": [4, 6],
-            "http": [7, 9],
-            "speedtest": [10, 12],
-            "ip": [13, 13],
-            "overall": [14, 15],
-        },
+        # Rank-sorted quality strip: no fixed per-monitor segments any more —
+        # every scored monitor (ping, dns, http, speedtest; "ip" is excluded,
+        # an address change is an event, not a quality measure) gets a slot
+        # sized as evenly as `count` allows, re-sorted greenest-first on
+        # every poll. See leds/quality.py.
+        "weights": {"ping": 1.0, "dns": 1.0, "http": 1.0, "speedtest": 0.25},
+        "orientation": "top_down",  # or "bottom_up" — matches physical mounting
+        "overall": True,            # show a combined-score slot at the bottom end
     },
     "alerts": {"email": {"enabled": False}},
     "logging": {

@@ -28,11 +28,12 @@ import storage.db as db
 from alerts.email_alert import EmailAlerter
 from config import load_config
 from leds.controller import LEDController
+from leds.quality import overall_score, quality_color_hex, score_monitor
 from monitors import dns as dns_monitor
 from monitors import http_check, ip_tracker, ping
 from monitors import speedtest as speedtest_monitor
 from monitors.base import MonitorResult
-from web.app import app, broadcast_status
+from web.app import app, broadcast_status, set_quality_snapshot
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
@@ -178,6 +179,13 @@ _monitor_configs: dict[str, dict] = {}
 _led: Optional[LEDController] = None
 _alerter: Optional[EmailAlerter] = None
 
+# Latest results per monitor, kept for the rank-sorted LED strip: every poll
+# rescores every monitor seen so far from its own latest results, so a
+# monitor on a slow interval (e.g. speedtest) isn't dropped from the strip
+# between its own polls just because a faster monitor (e.g. ping) just ran.
+_monitor_results: dict[str, list[MonitorResult]] = {}
+_led_weights: dict[str, float] = {}
+
 
 async def _clear_degraded_state(monitor_name: str) -> None:
     """Clear the degraded-episode state keys for a monitor (write "", not delete)."""
@@ -320,9 +328,37 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
     previous = _monitor_status.get(monitor_name, "unknown")
     _monitor_status[monitor_name] = new_status
 
-    # LED update
-    if _led:
-        await _led.update_segment(monitor_name, new_status)
+    # LED update — rank-sorted quality strip. "ip" is excluded: an address
+    # change is an event, not a quality measure (leds/quality.py).
+    _monitor_results[monitor_name] = results
+    if monitor_name != "ip":
+        scores = {
+            name: score_monitor(name, res, _monitor_configs.get(name, {}))
+            for name, res in _monitor_results.items()
+            if name != "ip"
+        }
+        overall = overall_score(scores, _led_weights)
+        ranking = sorted(scores.items(), key=lambda kv: -kv[1])
+
+        logger.debug(
+            "LED ranking: %s",
+            " > ".join(f"{name} {score:.2f}" for name, score in ranking),
+        )
+
+        set_quality_snapshot(
+            {
+                "scores": scores,
+                "overall": overall,
+                "ranking": [name for name, _score in ranking],
+                "colors": {
+                    **{name: quality_color_hex(score) for name, score in scores.items()},
+                    "overall": quality_color_hex(overall),
+                },
+            }
+        )
+
+        if _led:
+            await _led.render_quality(scores, overall)
 
     # Transition line — logged regardless of whether an alerter is configured
     # (email alerting is opt-in; the operator still needs this in the logfile).
@@ -493,7 +529,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    global _led, _alerter, _monitor_configs
+    global _led, _alerter, _monitor_configs, _led_weights
 
     config = load_config()
     _configure_logging(config)
@@ -506,7 +542,9 @@ async def main() -> None:
     logger.info("Database ready at %s", db_path)
 
     # LEDs
-    _led = LEDController(config.get("leds", {}))
+    leds_cfg = config.get("leds", {})
+    _led = LEDController(leds_cfg)
+    _led_weights = leds_cfg.get("weights", {})
 
     # Alerter
     _alerter = EmailAlerter(config.get("alerts", {}).get("email", {}))

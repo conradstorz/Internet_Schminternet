@@ -59,7 +59,35 @@ def test_leds_section(tmp_path):
     assert cfg["leds"]["enabled"] is True
     assert cfg["leds"]["count"] == 30
     # Other LED keys still present
-    assert "segments" in cfg["leds"]
+    assert "weights" in cfg["leds"]
+    assert cfg["leds"]["orientation"] == "top_down"
+    assert cfg["leds"]["overall"] is True
+
+
+def test_leds_default_weights_orientation_and_overall():
+    """New rank-sorted LED strip config: speedtest is downweighted by default."""
+    leds = DEFAULT_CONFIG["leds"]
+    assert leds["weights"] == {"ping": 1.0, "dns": 1.0, "http": 1.0, "speedtest": 0.25}
+    assert leds["orientation"] == "top_down"
+    assert leds["overall"] is True
+    assert "segments" not in leds
+
+
+def test_leds_weights_override_leaves_siblings_at_default(tmp_path):
+    """Overriding one weight leaves the other default weights (and
+    orientation) untouched, thanks to the deep merge."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        textwrap.dedent("""\
+            leds:
+              weights:
+                speedtest: 0.5
+        """),
+        encoding="utf-8",
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg["leds"]["weights"] == {"ping": 1.0, "dns": 1.0, "http": 1.0, "speedtest": 0.5}
+    assert cfg["leds"]["orientation"] == "top_down"
 
 
 def test_degraded_alert_keys_default_to_none():

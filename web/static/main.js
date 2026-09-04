@@ -96,6 +96,61 @@ async function fetchStatus() {
 }
 
 // ---------------------------------------------------------------------------
+// LED quality strip preview — a compact, ranked row of colour blocks
+// mirroring what the rank-sorted WS2812B strip would show, for dev machines
+// with no hardware to look at. Colours and order come straight from
+// /api/quality: best score first, "overall" (if present) always last since
+// it doesn't participate in the ranking.
+// ---------------------------------------------------------------------------
+
+const QUALITY_LABELS = { ping: "Ping", dns: "DNS", http: "HTTP", speedtest: "Speed", overall: "Overall" };
+
+function renderQualityStrip(data) {
+  const container = document.getElementById("quality-blocks");
+  if (!container || !data) return;
+
+  const order = [...(data.ranking || [])];
+  if (data.colors && "overall" in data.colors) order.push("overall");
+
+  if (order.length === 0) {
+    container.innerHTML = '<span class="quality-empty" id="quality-empty">Waiting for first poll…</span>';
+    return;
+  }
+
+  container.innerHTML = "";
+  for (const name of order) {
+    const color = (data.colors && data.colors[name]) || "#333333";
+    const score = name === "overall" ? data.overall : data.scores && data.scores[name];
+
+    const block = document.createElement("div");
+    block.className = "quality-block";
+
+    const swatch = document.createElement("div");
+    swatch.className = "quality-swatch";
+    swatch.style.background = color;
+    swatch.title = typeof score === "number" ? `${name}: ${score.toFixed(2)} (${color})` : `${name} (${color})`;
+
+    const label = document.createElement("span");
+    label.className = "quality-block-label";
+    label.textContent = QUALITY_LABELS[name] || name;
+
+    block.appendChild(swatch);
+    block.appendChild(label);
+    container.appendChild(block);
+  }
+}
+
+async function fetchQuality() {
+  try {
+    const res = await fetch("/api/quality");
+    const data = await res.json();
+    renderQualityStrip(data);
+  } catch (err) {
+    console.warn("Quality strip fetch failed:", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Server-Sent Events
 // ---------------------------------------------------------------------------
 
@@ -313,7 +368,7 @@ function heatmapGrid(points, { cols = 60, rows = 12 } = {}) {
   return { cells, maxCount, xMin, xMax, yMax };
 }
 
-const Dashboard = { percentile, clampSeries, clusterMarkers, bucketSeries, heatmapGrid };
+const Dashboard = { percentile, clampSeries, clusterMarkers, bucketSeries, heatmapGrid, renderQualityStrip };
 if (typeof window !== "undefined") window.Dashboard = Dashboard;
 
 // ---------------------------------------------------------------------------
@@ -1093,6 +1148,8 @@ function initTimeline() {
 async function init() {
   await fetchStatus();
   setInterval(fetchStatus, 10_000);
+  await fetchQuality();
+  setInterval(fetchQuality, 10_000);
   connectSSE();
 
   initStyleControl("chart-ping");

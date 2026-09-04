@@ -87,6 +87,35 @@
     .metric-value { font-size: 1.6rem; font-weight: 700; margin: 0.4rem 0 0.1rem; }
     .metric-unit  { font-size: 0.7rem; color: var(--muted); }
 
+    /* ── LED quality strip preview ──
+       A compact readout of the rank-sorted LED strip — same colours, same
+       top-to-bottom order — for machines with no hardware to look at. */
+    .quality-strip-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      flex-wrap: wrap;
+    }
+    .quality-strip-card .card-label { margin-bottom: 0; white-space: nowrap; }
+    .quality-blocks { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .quality-block {
+      display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
+    }
+    .quality-swatch {
+      width: 34px; height: 16px; border-radius: 0.3rem;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+    .quality-block-label {
+      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.03em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .quality-empty { font-size: 0.75rem; color: var(--muted); font-style: italic; }
+
     /* ── Charts ── */
     .charts-grid {
       display: grid;
@@ -233,6 +262,14 @@
       <span class="live-dot" id="live-dot"></span>
       <span id="last-update">Connecting…</span>
     </p>
+  </div>
+
+  <!-- ── LED quality strip preview ── -->
+  <div class="quality-strip-card" id="quality-strip">
+    <div class="card-label">LED Strip</div>
+    <div class="quality-blocks" id="quality-blocks">
+      <span class="quality-empty" id="quality-empty">Waiting for first poll…</span>
+    </div>
   </div>
 
   <!-- ── Status cards ── -->
