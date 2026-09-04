@@ -86,39 +86,46 @@ Guards:
 
 ### `leds/controller.py` (modified)
 
-A daemon render thread owns the strip.
+The split of responsibility is deliberately narrow: **`render_quality` keeps
+painting the pixels exactly as it does today**, and the animation thread
+only modulates brightness. The thread therefore never needs to know the slot
+colours, and there is no shared target state, no generation counter and no
+repaint logic — just a lock around strip access.
 
-**State**, guarded by a `threading.Lock`:
-- `_target: list[tuple[int, int, tuple[int, int, int]]]` — the painted slot
-  ranges, `(start, end, rgb)`, as computed today by `_slot_ranges` and
-  `quality_color`.
-- A monotonically-increasing generation counter, so the thread can tell
-  whether the pixels need repainting or only the brightness needs updating.
+**`render_quality(scores, overall)`** is unchanged in behaviour. It still
+computes the ranking and slot ranges, paints every pixel and calls `show()`,
+still via a single `run_in_executor` per poll — once every 30 s, which is
+nothing. Its only addition is starting the animation thread lazily on the
+first call.
 
-**`render_quality(scores, overall)`** stops touching hardware. It computes
-the ranking, slot ranges and colours — all already pure — swaps `_target`
-under the lock, bumps the generation, and returns. No `run_in_executor`
-call. It keeps its `async def` signature so the call site in
-`main.py` (the `await _led.render_quality(...)` in `run_monitor`) is
-unchanged.
+**The animation thread**, a daemon started lazily, at `fps` frames per
+second against `time.monotonic()`:
 
-**The thread loop**, at `fps` frames per second against a monotonic clock:
-1. Under the lock, read `_target` and the generation.
-2. If the generation changed since the last frame, repaint every pixel.
-   Otherwise skip — the colours only change once per poll.
-3. `setBrightness(round(base_brightness * breathe_factor(...)))`.
-4. `show()`.
-5. Sleep to the next frame deadline (computed from a fixed start time, so
-   the frame rate does not drift).
+1. `factor = breathe_factor(now - start, period, floor)`
+2. `strip.setBrightness(round(base_brightness * factor))`
+3. `strip.show()`
+4. Sleep to the next frame deadline, computed from a fixed start time so the
+   frame rate does not drift.
 
-Per-frame cost in the steady state is one brightness write plus one
-`show()`, not 16 pixel writes.
+`setBrightness` takes effect on the next `show()`, so re-showing the
+unchanged pixel buffer at a new brightness is the entire frame. Per-frame
+cost is one brightness write plus one `show()` — never 16 pixel writes.
+
+**Locking.** A single `threading.Lock` guards every strip access: the
+paint-and-show in `_render_quality_sync`, the animator's
+set-brightness-and-show, and `_set_all_sync`. `render_quality` runs on an
+executor thread and the animator on its own, so without it the two could
+interleave inside `rpi_ws281x`. If a poll repaints while the animator is
+mid-cycle, the next frame corrects the brightness within one frame period.
+
+`base_brightness` — currently a local in `_init_hardware` — is stored on the
+instance as `self._base_brightness` so the animator can scale it.
 
 **Lifecycle:**
-- The thread is started lazily on the first `render_quality()` call, so
-  nothing spins before the first poll and the strip does not breathe black.
-- If `animation.enabled` is false, no thread is started and
-  `render_quality()` falls back to today's single `run_in_executor` render.
+- Started lazily on the first `render_quality()` call, so nothing spins
+  before the first poll and the strip does not breathe black.
+- If `animation.enabled` is false, no thread is started; behaviour is
+  byte-for-byte today's.
 - If `_strip is None` — dev machine, or `rpi_ws281x` missing — no thread is
   started and everything no-ops exactly as today.
 - `blackout()` sets the stop event and joins the thread with a short timeout
@@ -127,9 +134,9 @@ Per-frame cost in the steady state is one brightness write plus one
 
 ### `main.py` (unchanged)
 
-No call-site changes. `render_quality` keeps its signature and its await;
-the awaited work simply becomes a lock-guarded state swap instead of an
-executor round-trip.
+No call-site changes at all. `render_quality` keeps its signature, its await
+and its executor round-trip; `blackout()` keeps its call site in the
+shutdown path.
 
 ### Dashboard (`web/templates/index.html`)
 
@@ -145,16 +152,15 @@ a plain readout of the API's colours.
 
 ## Architectural deviation
 
-`CLAUDE.md` currently states that blocking LED work goes through
-`loop.run_in_executor`. This design replaces that for the LED render path
-with a thread that owns the strip.
+`CLAUDE.md` states that blocking LED work goes through
+`loop.run_in_executor`. The per-poll render still does. The 25 fps animation
+loop does not — it runs on its own daemon thread.
 
-Rationale: at 25 fps, the executor route means ~25 task submissions per
-second, forever, on a Pi 3B that is simultaneously serving uvicorn and SSE
-clients. It also makes frame timing hostage to executor contention — a
-30-minute speedtest occupying the default executor would visibly stutter the
-breathe. A dedicated thread costs one lock and an explicit join, and in
-exchange the asyncio loop is untouched and the frame timing is steady.
+Rationale: via the executor, the animation would mean ~25 task submissions
+per second, forever, on a Pi 3B that is simultaneously serving uvicorn and
+SSE clients. It would also make frame timing hostage to executor contention
+— a 30-minute speedtest occupying the default executor would visibly stutter
+the breathe. A dedicated thread costs one lock and an explicit join.
 
 The `CLAUDE.md` convention text is updated as part of this change so the
 documented rule matches the code.
@@ -181,11 +187,13 @@ documented rule matches the code.
 **`tests/test_led_controller.py` (extended)** — with a fake strip object:
 - Animation disabled: `render_quality` still results in exactly one `show()`,
   and no thread is started.
-- Animation enabled: the thread starts on first render and issues multiple
-  `show()` calls over a short wall-clock window.
-- A second `render_quality` with different scores repaints the pixels.
+- Animation enabled: the thread starts on first render, and the fake strip
+  records multiple `setBrightness` values over a short wall-clock window,
+  all within `[round(base * floor), base]`.
+- Animation enabled: `render_quality` still paints the correct slot colours,
+  so every existing ranking assertion holds with the animator running.
 - `blackout()` joins the thread and leaves every pixel at `(0, 0, 0)`, with
-  no further writes after it returns.
+  no further `show()` calls after it returns.
 
 Existing `tests/test_led_controller.py`, `tests/test_led_wiring.py` and
 `tests/test_quality.py` must continue to pass unchanged.
