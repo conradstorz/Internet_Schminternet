@@ -4,11 +4,6 @@ services:
     image: internet-schminternet:latest
     container_name: schminternet
     restart: unless-stopped
-    # 8080 is taken on hpz440 (gte-admin) and 8090 gets claimed intermittently
-    # by a Tailscale-bound service, so the dashboard is published on 8099
-    # -> http://hpz440:8099
-    ports:
-      - "8099:8080"
     volumes:
       # SQLite history, the alert queue and the rotating logfile live on the
       # host, so `tail -f /opt/schminternet/data/schminternet.log` works without
@@ -24,3 +19,14 @@ services:
     labels:
       # Locally built image with no registry — nothing for watchtower to pull.
       com.centurylinklabs.watchtower.enable: "false"
+      traefik.enable: "true"
+      traefik.http.routers.schminternet.rule: Host(`schminternet.hpz440.ohr3023.org`)
+      traefik.http.services.schminternet.loadbalancer.server.port: "8080"
+      harbor.description: "Internet Schminternet"
+    networks:
+      - harbor
+      - default
+
+networks:
+  harbor:
+    external: true
