@@ -257,3 +257,26 @@ async def test_cleanup_old_prunes_alert_queue():
     rows = await db.get_pending_alerts()
     assert len(rows) == 1
     assert rows[0]["subject"] == "fresh"
+
+
+async def test_recent_values_filters_target_metric_and_failures():
+    await db.init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    await db.insert_metrics([
+        MonitorResult("speedtest", "cloudflare", ts, "download_mbps", 300.0, "ok"),
+        MonitorResult("speedtest", "cloudflare", ts, "download_mbps", 280.0, "ok"),
+        MonitorResult("speedtest", "cloudflare", ts, "download_mbps", -1.0, "down"),   # failed run
+        MonitorResult("speedtest", "cloudflare", ts, "upload_mbps", 40.0, "ok"),       # other metric
+        MonitorResult("speedtest", "ookla", ts, "download_mbps", 15.0, "ok"),           # other target
+    ])
+    values = await db.recent_values("speedtest", "cloudflare", "download_mbps", hours=24)
+    assert sorted(values) == [280.0, 300.0]
+
+
+async def test_recent_values_excludes_rows_outside_window():
+    await db.init_db()
+    old = "2000-01-01T00:00:00+00:00"
+    await db.insert_metrics([
+        MonitorResult("speedtest", "cloudflare", old, "download_mbps", 300.0, "ok"),
+    ])
+    assert await db.recent_values("speedtest", "cloudflare", "download_mbps", hours=24) == []

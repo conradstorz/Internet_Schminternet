@@ -32,6 +32,7 @@ from leds.quality import overall_score, quality_color_hex, score_monitor
 from monitors import dns as dns_monitor
 from monitors import http_check, ip_tracker, ping
 from monitors import speedtest as speedtest_monitor
+from monitors import speedtest_policy
 from monitors.base import MonitorResult
 from web.app import app, broadcast_status, set_quality_snapshot
 
@@ -525,6 +526,74 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive speedtest job — owns the intensity level, reschedules itself
+# ---------------------------------------------------------------------------
+
+class SpeedtestJob:
+    """Scheduler callable for the speedtest monitor.
+
+    Holds the current rung of monitors.speedtest.adaptive.ladder. After each
+    run it classifies the result (speedtest_policy.verdict), moves one rung
+    up on a poor run or one rung down after `calm_after` good runs
+    (speedtest_policy.next_level), and reschedules its own APScheduler
+    interval when the rung changes. Starts at rung 1 on every process start.
+    See docs/superpowers/specs/2026-10-09-cloudflare-adaptive-speedtest-design.md.
+    """
+
+    def __init__(self, config: dict, scheduler, job_id: str = "speedtest") -> None:
+        self._config = config
+        self._scheduler = scheduler
+        self._job_id = job_id
+        cfg = config["monitors"]["speedtest"]
+        self._expected = float(cfg.get("expected_download_mbps", 0))
+        self._degraded_ratio = float(cfg.get("thresholds", {}).get("degraded_ratio", 0.5))
+        adaptive = cfg["adaptive"]
+        self._ladder: list[dict] = adaptive["ladder"]
+        self._avg_ratio = float(adaptive.get("avg_ratio", 0.8))
+        self._min_samples = int(adaptive.get("min_samples", 3))
+        self._calm_after = int(adaptive.get("calm_after", 2))
+        self.level = min(1, len(self._ladder) - 1)
+        self.good_streak = 0
+
+    @property
+    def interval_seconds(self) -> int:
+        return int(self._ladder[self.level]["interval_seconds"])
+
+    def _params(self) -> dict:
+        return {"level": self.level, **self._ladder[self.level]}
+
+    async def __call__(self) -> None:
+        # Read the rolling-mean window before the run, or this reading would
+        # be part of the history it is compared against.
+        history = await db.recent_values(
+            "speedtest", speedtest_monitor.TARGET, "download_mbps", hours=24
+        )
+        results = await speedtest_monitor.run(self._config, self._params())
+        await run_monitor("speedtest", results)
+
+        download = next(
+            (r.value for r in results if r.metric == "download_mbps"), -1.0
+        )
+        outcome = speedtest_policy.verdict(
+            download, self._expected, self._degraded_ratio,
+            history, self._avg_ratio, self._min_samples,
+        )
+        previous = self.level
+        self.level, self.good_streak = speedtest_policy.next_level(
+            self.level, outcome, self.good_streak, self._calm_after, len(self._ladder) - 1
+        )
+        if self.level != previous:
+            self._scheduler.reschedule_job(
+                self._job_id, trigger="interval", seconds=self.interval_seconds
+            )
+            logger.info(
+                "speedtest %s run: level %d (%s) -> %d (%s), next in %ds",
+                outcome, previous, self._ladder[previous]["name"],
+                self.level, self._ladder[self.level]["name"], self.interval_seconds,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -554,7 +623,6 @@ async def main() -> None:
     # Pull monitor config sections
     ping_cfg     = config["monitors"]["ping"]
     dns_cfg      = config["monitors"]["dns"]
-    speed_cfg    = config["monitors"]["speedtest"]
     http_cfg     = config["monitors"]["http"]
     ip_cfg       = config["monitors"]["ip"]
     retention    = config["database"]["retention_days"]
@@ -566,14 +634,13 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler(executors=_build_executors())
 
+    job_speedtest = SpeedtestJob(config, scheduler)
+
     async def job_ping() -> None:
         await run_monitor("ping", await ping.run(config))
 
     async def job_dns() -> None:
         await run_monitor("dns", await dns_monitor.run(config))
-
-    async def job_speedtest() -> None:
-        await run_monitor("speedtest", await speedtest_monitor.run(config))
 
     async def job_http() -> None:
         await run_monitor("http", await http_check.run(config))
@@ -594,7 +661,11 @@ async def main() -> None:
 
     scheduler.add_job(job_ping,      "interval", seconds=ping_cfg.get("interval_seconds", 30),    id="ping",      misfire_grace_time=15)
     scheduler.add_job(job_dns,       "interval", seconds=dns_cfg.get("interval_seconds", 60),     id="dns",       misfire_grace_time=30)
-    scheduler.add_job(job_speedtest, "interval", seconds=speed_cfg.get("interval_seconds", 1800), id="speedtest", misfire_grace_time=60)
+    # Pass the bound method, not the instance: APScheduler's AsyncIOExecutor uses
+    # iscoroutinefunction_partial(job.func) to decide whether to await the job, and
+    # that check returns False for an instance's async __call__, silently sending it
+    # to a thread where the returned coroutine is never awaited or run.
+    scheduler.add_job(job_speedtest.__call__, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
     scheduler.add_job(job_http,      "interval", seconds=http_cfg.get("interval_seconds", 120),   id="http",      misfire_grace_time=30)
     scheduler.add_job(job_ip,        "interval", seconds=ip_cfg.get("interval_seconds", 300),     id="ip",        misfire_grace_time=60)
     scheduler.add_job(job_cleanup,   "cron",     hour=3,                                           id="cleanup")

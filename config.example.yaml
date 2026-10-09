@@ -50,13 +50,49 @@ monitors:
       down_ms: 1000
 
   speedtest:
-    interval_seconds: 1800   # 30 minutes — don't run too often on Pi 3B
+    # Measures against speed.cloudflare.com (nearest Cloudflare edge).
+    # Set this to the speed your plan advertises: with the default 0 the
+    # fixed threshold is off entirely, leaving only the rolling-mean rule
+    # below to drive the ladder (and _determine_status always "ok").
     expected_download_mbps: 50
     expected_upload_mbps: 10
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_cycles: 3      # Cycles alone is enough; minutes may stay unset
+    # For speedtest, a "cycle" is one poll and the poll interval now moves
+    # with the ladder below (30 min at calm, 1 min at investigate), so a
+    # cycle count means a different amount of wall time at every rung.
+    # Prefer degraded_alert_minutes here.
     thresholds:
       degraded_ratio: 0.5    # Below 50% of expected = degraded
+    streams: 4               # concurrent transfers per direction; same at every rung
+    timeout_seconds: 60      # total deadline for the download phase and again for
+                             # the upload phase (not per request); the latency
+                             # phase's 5 probes share one deadline the same way. On
+                             # expiry, a phase that moved at least one byte is cut
+                             # short and the bytes that did move are reported over
+                             # the elapsed time, so a link too slow to finish reads
+                             # as slow instead of down — but a phase that moves zero
+                             # bytes before the deadline fails the run (one `down`
+                             # row) and is not retried.
+    # Adaptive cadence. Starts at rung 1 ("watch"). A poor run climbs one
+    # rung; `calm_after` consecutive good runs descend one. A run is poor
+    # when download < expected * degraded_ratio, or < avg_ratio * the mean
+    # of the last 24 h (once min_samples readings exist).
+    # Data per run = at least streams * (download_bytes + upload_bytes) —
+    # a phase that fails once is retried in full, so a retried phase doubles
+    # its share. Held all day, these are minimums:
+    #   calm 2.7 GB, watch 16 GB, alert 100 GB, investigate 200 GB.
+    # Cloudflare refuses download_bytes above 50000000. Overriding `ladder`
+    # replaces the whole list (lists are not deep-merged).
+    adaptive:
+      avg_ratio: 0.8
+      min_samples: 3
+      calm_after: 2
+      ladder:
+        - { name: calm,        interval_seconds: 1800, download_bytes: 10000000, upload_bytes: 4000000 }
+        - { name: watch,       interval_seconds: 300,  download_bytes: 10000000, upload_bytes: 4000000 }
+        - { name: alert,       interval_seconds: 120,  download_bytes: 25000000, upload_bytes: 10000000 }
+        - { name: investigate, interval_seconds: 60,   download_bytes: 25000000, upload_bytes: 10000000 }
 
   http:
     targets:
@@ -103,8 +139,8 @@ leds:
   weights:
     # Used by overall_score() to combine each monitor's 0.0-1.0 score into
     # one number for the optional "overall" slot below. speedtest is
-    # deliberately downweighted: it only runs every 30 min (see
-    # monitors.speedtest.interval_seconds), so a stale or failed run should
+    # deliberately downweighted: it runs on an adaptive interval (see
+    # monitors.speedtest.adaptive.ladder), so a stale or failed run should
     # tint the overall colour rather than dominate it.
     ping: 1.0
     dns: 1.0
@@ -118,7 +154,7 @@ leds:
                                 # strip (does not participate in the ranking/sorting).
   animation:
     # A gentle brightness "breathe" so the strip visibly moves between
-    # polls. Between a ping poll (30 s) and a speedtest (30 min) the strip
+    # polls. Between a ping poll (30 s) and a speedtest (minutes apart) the strip
     # would otherwise sit perfectly still, which looks exactly like a
     # crashed service or a powered-off Pi. The animation is a liveness
     # signal only — it is identical on every slot regardless of score,

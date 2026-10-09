@@ -32,12 +32,41 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "thresholds": {"degraded_ms": 200, "down_ms": 1000},
         },
         "speedtest": {
-            "interval_seconds": 1800,
             "expected_download_mbps": 0,
             "expected_upload_mbps": 0,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ratio": 0.5},
+            # Cloudflare measurement: `streams` concurrent transfers per
+            # direction. Keep streams constant across ladder rungs so readings
+            # stay comparable — one TCP window cannot fill a fast link.
+            "streams": 4,
+            # Total deadline for the download phase and again for the upload
+            # phase, not a per-request timeout; the latency phase's probes
+            # share one deadline the same way. On expiry, a phase that moved
+            # at least one byte is cut short and the bytes that did move are
+            # reported over the elapsed time, so a link too slow to finish
+            # reads as slow, not down — but a phase that moves zero bytes
+            # before the deadline fails the run (one down row) and is not
+            # retried.
+            "timeout_seconds": 60,
+            # Adaptive cadence. The job starts at rung 1, climbs one rung on
+            # a poor run, and descends one rung after `calm_after` consecutive
+            # good runs. A run is poor when download is below
+            # expected * degraded_ratio, or below avg_ratio * the 24 h mean
+            # (once min_samples readings exist). Cloudflare refuses downloads
+            # above 50 MB. See monitors/speedtest_policy.py.
+            "adaptive": {
+                "avg_ratio": 0.8,
+                "min_samples": 3,
+                "calm_after": 2,
+                "ladder": [
+                    {"name": "calm",        "interval_seconds": 1800, "download_bytes": 10_000_000, "upload_bytes": 4_000_000},
+                    {"name": "watch",       "interval_seconds": 300,  "download_bytes": 10_000_000, "upload_bytes": 4_000_000},
+                    {"name": "alert",       "interval_seconds": 120,  "download_bytes": 25_000_000, "upload_bytes": 10_000_000},
+                    {"name": "investigate", "interval_seconds": 60,   "download_bytes": 25_000_000, "upload_bytes": 10_000_000},
+                ],
+            },
         },
         "http": {
             "targets": [

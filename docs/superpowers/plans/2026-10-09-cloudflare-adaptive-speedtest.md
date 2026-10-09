@@ -527,9 +527,9 @@ async def test_result_shape_and_label():
 
 async def test_status_uses_thresholds():
     rec = Recorder()
-    # Mock transport is near-instant, so measured Mbps is astronomically high
-    # and clears any realistic expectation.
-    results = await speedtest.run(_config(streams=2, expected_dl=50, expected_ul=10), PARAMS,
+    # The mock moves only a few KB, so measured Mbps is small but positive;
+    # a tiny expectation keeps the threshold path exercised without flakiness.
+    results = await speedtest.run(_config(streams=2, expected_dl=0.0001, expected_ul=0.0001), PARAMS,
                                   transport=httpx.MockTransport(rec))
     rows = _rows(results)
     assert rows["download_mbps"].status == "ok"
@@ -988,7 +988,10 @@ Replace the `add_job` line for speedtest:
 with:
 
 ```python
-    scheduler.add_job(job_speedtest, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60)
+    # Bound method, not the instance: APScheduler's coroutine detection
+    # (iscoroutinefunction) does not see an instance's async __call__ and
+    # would run it in a thread, silently dropping the coroutine.
+    scheduler.add_job(job_speedtest.__call__, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
 ```
 
 `speed_cfg` is no longer used after this change; delete the line `speed_cfg    = config["monitors"]["speedtest"]`.
@@ -1003,7 +1006,7 @@ Expected: all pass
 
 - [ ] **Step 6: Smoke-start the app to prove the scheduler accepts a callable object**
 
-Run: `uv run python -c "import main; import asyncio; from apscheduler.schedulers.asyncio import AsyncIOScheduler; from config import load_config; s = AsyncIOScheduler(); j = main.SpeedtestJob(load_config('/nonexistent'), s); s.add_job(j, 'interval', seconds=j.interval_seconds, id='speedtest'); print('ok', j.interval_seconds)"`
+Run: `uv run python -c "import main; import asyncio; from apscheduler.schedulers.asyncio import AsyncIOScheduler; from config import load_config; s = AsyncIOScheduler(); j = main.SpeedtestJob(load_config('/nonexistent'), s); s.add_job(j.__call__, 'interval', seconds=j.interval_seconds, id='speedtest'); print('ok', j.interval_seconds)"`
 Expected output: `ok 300`
 
 - [ ] **Step 7: Commit**

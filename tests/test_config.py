@@ -145,3 +145,21 @@ class TestLedAnimationDefaults:
         assert animation["min_brightness"] == 0.7
         assert animation["fps"] == 25
         assert animation["enabled"] is True
+
+
+def test_speedtest_defaults_have_adaptive_ladder():
+    cfg = load_config("/nonexistent/config.yaml")
+    speed = cfg["monitors"]["speedtest"]
+    assert "interval_seconds" not in speed
+    assert speed["streams"] == 4
+    assert speed["timeout_seconds"] == 60
+    adaptive = speed["adaptive"]
+    assert adaptive["avg_ratio"] == 0.8
+    assert adaptive["min_samples"] == 3
+    assert adaptive["calm_after"] == 2
+    ladder = adaptive["ladder"]
+    assert [rung["name"] for rung in ladder] == ["calm", "watch", "alert", "investigate"]
+    assert [rung["interval_seconds"] for rung in ladder] == [1800, 300, 120, 60]
+    assert [rung["download_bytes"] for rung in ladder] == [10_000_000, 10_000_000, 25_000_000, 25_000_000]
+    assert [rung["upload_bytes"] for rung in ladder] == [4_000_000, 4_000_000, 10_000_000, 10_000_000]
+    assert all(rung["download_bytes"] <= 50_000_000 for rung in ladder)
