@@ -12,7 +12,7 @@ connection and displays the status on a WS2812B LED strip and a local web dashbo
 | **Ping** | Latency (ms) + packet loss % to configurable hosts | 30 s |
 | **DNS** | Resolution time against specific nameservers | 60 s |
 | **HTTP** | Response time + reachability of configurable URLs | 120 s |
-| **Speedtest** | Download / upload Mbps via Speedtest.net | 30 min |
+| **Speedtest** | Download / upload Mbps via speed.cloudflare.com | adaptive, 1–30 min |
 | **IP Tracker** | External IP address change detection | 5 min |
 
 Results are stored in a local SQLite database and shown on:
@@ -174,7 +174,7 @@ row in the same ranked order.
 ## Notes
 
 - The speedtest runs in a background thread so it doesn't block the event loop.
-  Keep the interval ≥ 30 minutes on a Pi 3B — the test saturates the CPU briefly.
+  Cadence is adaptive (see `monitors.speedtest.adaptive` in config.example.yaml): good results slow it to every 30 minutes, poor results speed it up to every minute with larger transfers until the link recovers.
 - `config.yaml` is gitignored. Never commit credentials.
 - The web dashboard depends on CDN links for Chart.js and Luxon. If you want
   the dashboard to function with the internet completely down, download these
