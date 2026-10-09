@@ -527,9 +527,9 @@ async def test_result_shape_and_label():
 
 async def test_status_uses_thresholds():
     rec = Recorder()
-    # Mock transport is near-instant, so measured Mbps is astronomically high
-    # and clears any realistic expectation.
-    results = await speedtest.run(_config(streams=2, expected_dl=50, expected_ul=10), PARAMS,
+    # The mock moves only a few KB, so measured Mbps is small but positive;
+    # a tiny expectation keeps the threshold path exercised without flakiness.
+    results = await speedtest.run(_config(streams=2, expected_dl=0.0001, expected_ul=0.0001), PARAMS,
                                   transport=httpx.MockTransport(rec))
     rows = _rows(results)
     assert rows["download_mbps"].status == "ok"
