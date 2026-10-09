@@ -244,6 +244,33 @@ async def test_download_deadline_reports_partial_throughput():
     assert elapsed < SLOW_CHUNKS * SLOW_DELAY
 
 
+def zero_bytes_handler(request: httpx.Request) -> httpx.Response:
+    """Like slow_handler, but the download stream never yields a single
+    chunk before the deadline — the deadline fires with zero bytes moved."""
+    if request.url.path == "/__down":
+        n = int(request.url.params.get("bytes", "0"))
+        if n == 0:
+            return httpx.Response(200, content=b"")
+        return httpx.Response(200, stream=SlowStream(b"0" * 1_000, SLOW_CHUNKS, 1.0))
+    if request.url.path == "/__up":
+        return httpx.Response(200, text="ok")
+    return httpx.Response(404)
+
+
+async def test_download_deadline_with_zero_bytes_fails_the_run():
+    """A deadline that fires with nothing transferred is a failure, not a
+    0.0 Mbps reading — zero bytes in a whole deadline window is down, not
+    slow."""
+    results = await speedtest.run(_config(streams=2, timeout_seconds=0.4), PARAMS,
+                                  transport=httpx.MockTransport(zero_bytes_handler))
+    assert len(results) == 1
+    row = results[0]
+    assert row.metric == "download_mbps"
+    assert row.value == -1.0
+    assert row.status == "down"
+    assert "no bytes" in row.message
+
+
 def test_run_label_formats_megabytes():
     params = {"level": 1, "name": "watch", "download_bytes": 10_000_000, "upload_bytes": 4_000_000}
     assert speedtest._run_label(params, 4) == "level=1 watch 4x10MB/4x4MB"

@@ -13,9 +13,14 @@ monitors/speedtest_policy.py and the `adaptive` config block).
 
 `timeout_seconds` is a per-phase *total* deadline, not just a per-request
 one: the download phase and the upload phase each get that long in whole.
-Hitting the deadline does not fail the run — the in-flight streams are
-cancelled and the bytes that did move are divided by the elapsed time, so a
-link too slow to finish reads as slow rather than as down. The pool-warming
+Hitting the deadline does not fail the run as long as some bytes moved — the
+in-flight streams are cancelled and the bytes that did move are divided by
+the elapsed time, so a link too slow to finish reads as slow rather than as
+down. A deadline that fires with zero bytes moved is a failure, not a 0.0
+Mbps reading, and propagates out of the phase like any other exception
+(there is no second attempt on this path — opening a second deadline window
+after the first already expired would double the worst-case time a dead
+link ties up the phase). The pool-warming
 requests sit outside the deadline on purpose, so handshakes are neither
 inside the timed window nor eating into it. Each transfer phase is retried
 once before it is allowed to fail the run, and the latency probe tolerates
@@ -109,12 +114,16 @@ async def _run_phase(
     attempt: Callable[[], Awaitable[list[int]]],
     moved: list[int],
     timeout_seconds: float,
+    phase: str,
 ) -> tuple[int, float]:
     """Run one transfer phase under a total deadline; return (bytes, seconds).
 
     One retry is allowed before a failure is propagated. On the deadline the
     streams are cancelled and whatever `moved` has collected so far is
-    reported, so the caller still gets a throughput number.
+    reported, so the caller still gets a throughput number — unless nothing
+    at all moved, in which case the whole deadline window was spent with no
+    evidence of a working link, and that is a failure rather than a 0.0
+    reading.
     """
     start = time.perf_counter()
     try:
@@ -126,7 +135,12 @@ async def _run_phase(
                 total = sum(await attempt())
             return total, time.perf_counter() - start
     except TimeoutError:
-        return sum(moved), time.perf_counter() - start
+        total = sum(moved)
+        if total == 0:
+            raise RuntimeError(
+                f"{phase}: no bytes transferred within {timeout_seconds}s"
+            ) from None
+        return total, time.perf_counter() - start
 
 
 async def _fetch(client: httpx.AsyncClient, nbytes: int, moved: list[int]) -> int:
@@ -157,7 +171,7 @@ async def _measure_download(
     def attempt() -> Awaitable[list[int]]:
         return _gather_streams([_fetch(client, nbytes, moved) for _ in range(streams)])
 
-    total, elapsed = await _run_phase(attempt, moved, timeout_seconds)
+    total, elapsed = await _run_phase(attempt, moved, timeout_seconds, "download")
     return _mbps(total, elapsed)
 
 
@@ -178,7 +192,7 @@ async def _measure_upload(
     def attempt() -> Awaitable[list[int]]:
         return _gather_streams([_push(client, payload, moved) for _ in range(streams)])
 
-    total, elapsed = await _run_phase(attempt, moved, timeout_seconds)
+    total, elapsed = await _run_phase(attempt, moved, timeout_seconds, "upload")
     return _mbps(total, elapsed)
 
 
