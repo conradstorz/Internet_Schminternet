@@ -40,7 +40,9 @@ async def test_speedtest_job_is_dispatched_as_coroutine(monkeypatch):
 
     scheduler = AsyncIOScheduler(executors=main._build_executors())
     job = main.SpeedtestJob(load_config("/nonexistent/config.yaml"), scheduler)
-    scheduler.add_job(job.__call__, "interval", seconds=1, id="speedtest", max_instances=1, coalesce=True)
+    # misfire_grace_time mirrors main(); APScheduler's default of 1 s would
+    # drop this 1 s-interval job whenever the loop is briefly contended.
+    scheduler.add_job(job.__call__, "interval", seconds=1, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
     scheduler.start()
     try:
         await asyncio.sleep(2.5)

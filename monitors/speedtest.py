@@ -11,6 +11,16 @@ the deployment host one stream measured 146 Mbps and four measured 383 Mbps.
 comparable; only the byte sizes and the cadence change (see
 monitors/speedtest_policy.py and the `adaptive` config block).
 
+`timeout_seconds` is a per-phase *total* deadline, not just a per-request
+one: the download phase and the upload phase each get that long in whole.
+Hitting the deadline does not fail the run — the in-flight streams are
+cancelled and the bytes that did move are divided by the elapsed time, so a
+link too slow to finish reads as slow rather than as down. The pool-warming
+requests sit outside the deadline on purpose, so handshakes are neither
+inside the timed window nor eating into it. Each transfer phase is retried
+once before it is allowed to fail the run, and the latency probe tolerates
+up to two failures out of five.
+
 The whole measurement is async on httpx — no thread executor is needed.
 Cloudflare refuses __down requests above 50 MB (HTTP 403).
 """
@@ -20,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import statistics
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import httpx
@@ -27,9 +38,11 @@ import httpx
 from monitors.base import MonitorResult, Status
 
 BASE_URL = "https://speed.cloudflare.com"
+TARGET = "cloudflare"
 _DOWN = f"{BASE_URL}/__down"
 _UP = f"{BASE_URL}/__up"
 _LATENCY_SAMPLES = 5
+_LATENCY_MIN_OK = 3
 
 
 def _determine_status(value_mbps: float, expected_mbps: float, degraded_ratio: float) -> Status:
@@ -55,48 +68,118 @@ def _run_label(params: dict, streams: int) -> str:
 
 
 async def _measure_latency(client: httpx.AsyncClient) -> float:
-    """Median round-trip of small requests, in milliseconds."""
+    """Median round-trip of small requests, in milliseconds.
+
+    A probe that errors or answers non-2xx is dropped rather than failing the
+    whole measurement; the median of the survivors is still representative as
+    long as most of them came back.
+    """
     samples: list[float] = []
     for _ in range(_LATENCY_SAMPLES):
         start = time.perf_counter()
-        resp = await client.get(_DOWN, params={"bytes": 0})
-        resp.raise_for_status()
+        try:
+            resp = await client.get(_DOWN, params={"bytes": 0})
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            continue
         samples.append((time.perf_counter() - start) * 1000)
+    if len(samples) < _LATENCY_MIN_OK:
+        raise RuntimeError(
+            f"latency: only {len(samples)}/{_LATENCY_SAMPLES} probes succeeded"
+        )
     return statistics.median(samples)
 
 
-async def _fetch(client: httpx.AsyncClient, nbytes: int) -> int:
-    """Stream one download and discard the body; return bytes received."""
+async def _gather_streams(coros) -> list[int]:
+    """Await every stream, then surface the first failure.
+
+    asyncio.gather's default would hand back the first exception while the
+    sibling streams were still running, and those stragglers would then bleed
+    bytes into the retry's counter and raise "task exception was never
+    retrieved" at collection time.
+    """
+    outcomes = await asyncio.gather(*coros, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    return list(outcomes)
+
+
+async def _run_phase(
+    attempt: Callable[[], Awaitable[list[int]]],
+    moved: list[int],
+    timeout_seconds: float,
+) -> tuple[int, float]:
+    """Run one transfer phase under a total deadline; return (bytes, seconds).
+
+    One retry is allowed before a failure is propagated. On the deadline the
+    streams are cancelled and whatever `moved` has collected so far is
+    reported, so the caller still gets a throughput number.
+    """
+    start = time.perf_counter()
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            try:
+                total = sum(await attempt())
+            except Exception:
+                moved.clear()
+                total = sum(await attempt())
+            return total, time.perf_counter() - start
+    except TimeoutError:
+        return sum(moved), time.perf_counter() - start
+
+
+async def _fetch(client: httpx.AsyncClient, nbytes: int, moved: list[int]) -> int:
+    """Stream one download and discard the body; return bytes received.
+
+    Every chunk is also appended to `moved` so the total survives the
+    cancellation that a phase deadline brings.
+    """
     received = 0
     async with client.stream("GET", _DOWN, params={"bytes": nbytes}) as resp:
         resp.raise_for_status()
         async for chunk in resp.aiter_bytes():
             received += len(chunk)
+            moved.append(len(chunk))
     return received
 
 
-async def _measure_download(client: httpx.AsyncClient, streams: int, nbytes: int) -> float:
+async def _measure_download(
+    client: httpx.AsyncClient, streams: int, nbytes: int, timeout_seconds: float
+) -> float:
     # Open `streams` connections before the clock starts so handshakes are
-    # not inside the timed window; upload then reuses the same warm pool,
-    # keeping the two numbers on the same basis.
-    await asyncio.gather(*(_fetch(client, 0) for _ in range(streams)))
-    start = time.perf_counter()
-    sizes = await asyncio.gather(*(_fetch(client, nbytes) for _ in range(streams)))
-    return _mbps(sum(sizes), time.perf_counter() - start)
+    # neither inside the timed window nor spending the phase deadline; upload
+    # then reuses the same warm pool, keeping the two numbers on the same
+    # basis.
+    await _gather_streams([_fetch(client, 0, []) for _ in range(streams)])
+    moved: list[int] = []
+
+    def attempt() -> Awaitable[list[int]]:
+        return _gather_streams([_fetch(client, nbytes, moved) for _ in range(streams)])
+
+    total, elapsed = await _run_phase(attempt, moved, timeout_seconds)
+    return _mbps(total, elapsed)
 
 
-async def _push(client: httpx.AsyncClient, payload: bytes) -> int:
+async def _push(client: httpx.AsyncClient, payload: bytes, moved: list[int]) -> int:
     resp = await client.post(_UP, content=payload,
                              headers={"Content-Type": "application/octet-stream"})
     resp.raise_for_status()
+    moved.append(len(payload))
     return len(payload)
 
 
-async def _measure_upload(client: httpx.AsyncClient, streams: int, nbytes: int) -> float:
+async def _measure_upload(
+    client: httpx.AsyncClient, streams: int, nbytes: int, timeout_seconds: float
+) -> float:
     payload = b"\0" * nbytes
-    start = time.perf_counter()
-    sizes = await asyncio.gather(*(_push(client, payload) for _ in range(streams)))
-    return _mbps(sum(sizes), time.perf_counter() - start)
+    moved: list[int] = []
+
+    def attempt() -> Awaitable[list[int]]:
+        return _gather_streams([_push(client, payload, moved) for _ in range(streams)])
+
+    total, elapsed = await _run_phase(attempt, moved, timeout_seconds)
+    return _mbps(total, elapsed)
 
 
 async def run(
@@ -120,26 +203,32 @@ async def run(
     label = _run_label(params, streams)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        limits = httpx.Limits(max_connections=streams, max_keepalive_connections=streams)
+        async with httpx.AsyncClient(timeout=timeout, limits=limits,
+                                     transport=transport) as client:
             ping = await _measure_latency(client)
-            download = await _measure_download(client, streams, int(params["download_bytes"]))
-            upload = await _measure_upload(client, streams, int(params["upload_bytes"]))
+            download = await _measure_download(
+                client, streams, int(params["download_bytes"]), timeout
+            )
+            upload = await _measure_upload(
+                client, streams, int(params["upload_bytes"]), timeout
+            )
         ts = datetime.now(timezone.utc).isoformat()
         return [
             MonitorResult(
-                monitor="speedtest", target="cloudflare", timestamp=ts,
+                monitor="speedtest", target=TARGET, timestamp=ts,
                 metric="download_mbps", value=round(download, 2),
                 status=_determine_status(download, expected_dl, degraded_ratio),
                 message=label,
             ),
             MonitorResult(
-                monitor="speedtest", target="cloudflare", timestamp=ts,
+                monitor="speedtest", target=TARGET, timestamp=ts,
                 metric="upload_mbps", value=round(upload, 2),
                 status=_determine_status(upload, expected_ul, degraded_ratio),
                 message=label,
             ),
             MonitorResult(
-                monitor="speedtest", target="cloudflare", timestamp=ts,
+                monitor="speedtest", target=TARGET, timestamp=ts,
                 metric="ping_ms", value=round(ping, 2), status="ok",
                 message=label,
             ),
@@ -148,7 +237,7 @@ async def run(
         ts = datetime.now(timezone.utc).isoformat()
         return [
             MonitorResult(
-                monitor="speedtest", target="cloudflare", timestamp=ts,
+                monitor="speedtest", target=TARGET, timestamp=ts,
                 metric="download_mbps", value=-1.0, status="down",
                 message=str(exc),
             )

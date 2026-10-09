@@ -104,6 +104,28 @@ async def test_rolling_mean_from_db_feeds_verdict(stubs):
     history.assert_awaited_once_with("speedtest", "cloudflare", "download_mbps", hours=24)
 
 
+async def test_history_window_is_read_before_the_run(monkeypatch):
+    """The rolling mean must not include the reading being judged, so the
+    history query has to happen before the monitor writes this run's row."""
+    order: list[str] = []
+
+    async def fake_run(config, params):
+        order.append("run")
+        return _download(300.0)
+
+    async def fake_history(*args, **kwargs):
+        order.append("history")
+        return []
+
+    monkeypatch.setattr(main.speedtest_monitor, "run", fake_run)
+    monkeypatch.setattr(main.db, "recent_values", fake_history)
+    monkeypatch.setattr(main, "run_monitor", AsyncMock())
+
+    job = main.SpeedtestJob(_config(), MagicMock())
+    await job()
+    assert order == ["history", "run"]
+
+
 async def test_failed_run_escalates(stubs):
     run, _, _ = stubs
     run.return_value = _download(-1.0)

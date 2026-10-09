@@ -33,7 +33,7 @@ def verdict(
         return "poor"
     if expected_mbps > 0 and download_mbps < expected_mbps * degraded_ratio:
         return "poor"
-    if len(history) >= min_samples:
+    if history and len(history) >= min_samples:
         mean = sum(history) / len(history)
         if download_mbps < avg_ratio * mean:
             return "poor"

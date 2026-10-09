@@ -31,6 +31,11 @@ class TestVerdict:
         # Only two samples: the rolling rule must not apply.
         assert verdict(200.0, 0, 0.5, [300.0, 300.0], 0.8, 3) == "good"
 
+    def test_empty_history_never_divides_by_zero(self):
+        # min_samples 0 satisfies len(history) >= min_samples with no
+        # readings at all; the rolling rule must stay off, not divide by 0.
+        assert verdict(100.0, 0, 0.5, [], 0.8, 0) == "good"
+
     def test_fixed_threshold_still_applies_below_min_samples(self):
         assert verdict(20.0, 50, 0.5, [300.0], 0.8, 3) == "poor"
 

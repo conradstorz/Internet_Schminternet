@@ -563,13 +563,17 @@ class SpeedtestJob:
         return {"level": self.level, **self._ladder[self.level]}
 
     async def __call__(self) -> None:
+        # Read the rolling-mean window before the run, or this reading would
+        # be part of the history it is compared against.
+        history = await db.recent_values(
+            "speedtest", speedtest_monitor.TARGET, "download_mbps", hours=24
+        )
         results = await speedtest_monitor.run(self._config, self._params())
         await run_monitor("speedtest", results)
 
         download = next(
             (r.value for r in results if r.metric == "download_mbps"), -1.0
         )
-        history = await db.recent_values("speedtest", "cloudflare", "download_mbps", hours=24)
         outcome = speedtest_policy.verdict(
             download, self._expected, self._degraded_ratio,
             history, self._avg_ratio, self._min_samples,
