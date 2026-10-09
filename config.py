@@ -41,6 +41,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # direction. Keep streams constant across ladder rungs so readings
             # stay comparable — one TCP window cannot fill a fast link.
             "streams": 4,
+            # Total deadline for the download phase and again for the upload
+            # phase, not a per-request timeout. On expiry the streams are cut
+            # short and the bytes that did move are reported over the elapsed
+            # time, so a link too slow to finish reads as slow, not down.
             "timeout_seconds": 60,
             # Adaptive cadence. The job starts at rung 1, climbs one rung on
             # a poor run, and descends one rung after `calm_after` consecutive

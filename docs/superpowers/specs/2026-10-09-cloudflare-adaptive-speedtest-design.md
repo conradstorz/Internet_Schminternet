@@ -28,7 +28,8 @@ run more often.
    frequent until the problem clears.
 
 Non-goals: comparing providers, persisting the intensity level across
-restarts, partial credit for a run in which some streams fail.
+restarts, partial credit for a run in which some streams *fail* (a phase that
+runs out of time is handled separately — see Errors).
 
 ## Measurement (`monitors/speedtest.py`)
 
@@ -36,7 +37,9 @@ Fully async on `httpx.AsyncClient`. No thread executor; the old
 "CPU-intensive, offload to a thread" rationale was specific to
 `speedtest-cli`.
 
-- **Latency** — median of 5 round-trips to `__down?bytes=0`.
+- **Latency** — median of 5 round-trips to `__down?bytes=0`. Up to two
+  probes may fail (error or non-2xx) and are simply dropped from the
+  median; fewer than three survivors fails the run.
 - **Download** — `streams` concurrent GETs of `__down?bytes=<download_bytes>`,
   bodies streamed and discarded. Mbps = total bytes × 8 / wall time from
   first request start to last stream end / 1e6.
@@ -48,6 +51,8 @@ Fully async on `httpx.AsyncClient`. No thread executor; the old
   comparable across levels — streams are free, bytes are not.
 - Cloudflare serves at most 50 MB per `__down` request; sizes above that
   return 403. The ladder below stays well under it.
+- Each transfer phase (download, upload) is retried once before it is
+  allowed to fail the run, so one rejected stream is not an outage.
 
 Results keep the current shape: three `MonitorResult` rows, `target` is
 now `"cloudflare"`, metrics `download_mbps`, `upload_mbps`, `ping_ms`.
@@ -55,10 +60,17 @@ now `"cloudflare"`, metrics `download_mbps`, `upload_mbps`, `ping_ms`.
 intensity level and sizes that produced it, e.g. `level=2 4x25MB/4x10MB`,
 so logs and the dashboard show which tier a number came from.
 
-**Errors.** Any exception or timeout in any stream fails the run: one
+**Errors.** An exception that survives the phase retry fails the run: one
 `download_mbps` row with `value = -1.0`, `status = "down"`, and the
-exception text, exactly as today. `timeout_seconds` bounds each HTTP
-request.
+exception text, exactly as today. `timeout_seconds` is a per-phase *total*
+deadline — the download phase gets that long in whole, and the upload phase
+again — rather than a per-request bound. Reaching the deadline does **not**
+fail the run: the in-flight streams are cancelled and the phase reports the
+bytes actually transferred divided by the elapsed time, so a link too slow
+to finish the configured transfer reads as slow (and the policy's verdict
+turns "poor", escalating the ladder) instead of as down. The pool-warming
+requests sit outside the deadline, so handshakes neither land in the timed
+window nor consume it.
 
 ## Intensity ladder
 

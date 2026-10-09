@@ -1006,7 +1006,7 @@ Expected: all pass
 
 - [ ] **Step 6: Smoke-start the app to prove the scheduler accepts a callable object**
 
-Run: `uv run python -c "import main; import asyncio; from apscheduler.schedulers.asyncio import AsyncIOScheduler; from config import load_config; s = AsyncIOScheduler(); j = main.SpeedtestJob(load_config('/nonexistent'), s); s.add_job(j, 'interval', seconds=j.interval_seconds, id='speedtest'); print('ok', j.interval_seconds)"`
+Run: `uv run python -c "import main; import asyncio; from apscheduler.schedulers.asyncio import AsyncIOScheduler; from config import load_config; s = AsyncIOScheduler(); j = main.SpeedtestJob(load_config('/nonexistent'), s); s.add_job(j.__call__, 'interval', seconds=j.interval_seconds, id='speedtest'); print('ok', j.interval_seconds)"`
 Expected output: `ok 300`
 
 - [ ] **Step 7: Commit**

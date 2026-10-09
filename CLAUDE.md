@@ -35,10 +35,10 @@ There is no linter or formatter configured.
 1. A scheduler job calls `monitors/<name>.run(config)` → `list[MonitorResult]` (`monitors/base.py`)
 2. `run_monitor()` in `main.py` persists them (`storage/db.py`), collapses them to one status per monitor ("worst wins": `down` > `degraded` > `ok` > `unknown`), rescores every monitor seen so far and re-renders the rank-sorted LED strip, fires alerts on transition, and pushes an SSE payload via `web.app.broadcast_status`
 
-**Scheduled jobs** (`main.py`): the five monitors on their configured intervals, plus `cleanup` (cron 03:00, retention purge + VACUUM), `heartbeat` (60 s, writes `last_seen_at`), and `alert_flush` (5 min, retries queued email). Ping/DNS/HTTP/IP also fire once immediately at startup — speedtest deliberately does not.
+**Scheduled jobs** (`main.py`): the five monitors on their configured intervals (speedtest on its adaptive ladder), plus `cleanup` (cron 03:00, retention purge + VACUUM), `heartbeat` (60 s, writes `last_seen_at`), and `alert_flush` (5 min, retries queued email). Ping/DNS/HTTP/IP also fire once immediately at startup — speedtest deliberately does not.
 
 **Conventions that matter:**
-- All monitors are `async def run(config: dict) -> list[MonitorResult]`; `value = -1.0` is the error sentinel; timestamps are ISO-8601 UTC strings.
+- All monitors are `async def run(config: dict) -> list[MonitorResult]` (speedtest additionally takes the ladder rung as `params`); `value = -1.0` is the error sentinel; timestamps are ISO-8601 UTC strings.
 - Blocking work (ping subprocess, LED `show()`) goes through `loop.run_in_executor`, and `loop` must come from `asyncio.get_running_loop()` inside the coroutine — never captured at construction time. The one exception is the LED breathe animation, which runs on its own daemon thread (`_animation_loop` in `leds/controller.py`): at 25 fps the executor route would mean ~25 task submissions per second forever, competing with uvicorn and SSE on a Pi 3B, and would let any long executor job stutter the frame timing. The per-poll render still goes through the executor.
 - Ping and DNS fan out across their targets with `asyncio.gather`, so total poll time is one target's latency, not the sum. `tests/test_monitor_concurrency.py` asserts this with wall-clock timing.
 - Each monitor exposes a pure `_determine_status(...)` tested directly in `tests/test_thresholds.py`.

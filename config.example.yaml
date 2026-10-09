@@ -51,14 +51,25 @@ monitors:
 
   speedtest:
     # Measures against speed.cloudflare.com (nearest Cloudflare edge).
+    # Set this to the speed your plan advertises: with the default 0 the
+    # fixed threshold is off entirely, leaving only the rolling-mean rule
+    # below to drive the ladder (and _determine_status always "ok").
     expected_download_mbps: 50
     expected_upload_mbps: 10
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_cycles: 3      # Cycles alone is enough; minutes may stay unset
+    # For speedtest, a "cycle" is one poll and the poll interval now moves
+    # with the ladder below (30 min at calm, 1 min at investigate), so a
+    # cycle count means a different amount of wall time at every rung.
+    # Prefer degraded_alert_minutes here.
     thresholds:
       degraded_ratio: 0.5    # Below 50% of expected = degraded
     streams: 4               # concurrent transfers per direction; same at every rung
-    timeout_seconds: 60      # per HTTP request
+    timeout_seconds: 60      # total deadline for the download phase and again for
+                             # the upload phase (not per request). On expiry the
+                             # streams are cut short and the bytes that did move are
+                             # reported over the elapsed time, so a link too slow to
+                             # finish reads as slow instead of down.
     # Adaptive cadence. Starts at rung 1 ("watch"). A poor run climbs one
     # rung; `calm_after` consecutive good runs descend one. A run is poor
     # when download < expected * degraded_ratio, or < avg_ratio * the mean
