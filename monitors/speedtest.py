@@ -76,6 +76,10 @@ async def _fetch(client: httpx.AsyncClient, nbytes: int) -> int:
 
 
 async def _measure_download(client: httpx.AsyncClient, streams: int, nbytes: int) -> float:
+    # Open `streams` connections before the clock starts so handshakes are
+    # not inside the timed window; upload then reuses the same warm pool,
+    # keeping the two numbers on the same basis.
+    await asyncio.gather(*(_fetch(client, 0) for _ in range(streams)))
     start = time.perf_counter()
     sizes = await asyncio.gather(*(_fetch(client, nbytes) for _ in range(streams)))
     return _mbps(sum(sizes), time.perf_counter() - start)

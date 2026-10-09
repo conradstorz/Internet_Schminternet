@@ -53,8 +53,16 @@ async def test_download_uses_configured_streams_and_size():
     results = await speedtest.run(_config(streams=3), PARAMS, transport=httpx.MockTransport(rec))
     rows = _rows(results)
     assert rows["download_mbps"].value > 0
-    # 5 latency probes ask for 0 bytes; the 3 download streams ask for 1_000 each.
-    assert sorted(rec.downloads) == [0, 0, 0, 0, 0, 1_000, 1_000, 1_000]
+    # 5 latency probes + 3 pool-warming requests ask for 0 bytes; the 3
+    # download streams ask for 1_000 each.
+    assert sorted(rec.downloads) == [0] * 8 + [1_000, 1_000, 1_000]
+
+
+async def test_download_warmup_count_tracks_streams():
+    rec = Recorder()
+    await speedtest.run(_config(streams=2), PARAMS, transport=httpx.MockTransport(rec))
+    # 5 latency probes + 2 pool-warming requests == 7 zero-byte downloads.
+    assert rec.downloads.count(0) == 7
 
 
 async def test_upload_posts_configured_size_per_stream():
