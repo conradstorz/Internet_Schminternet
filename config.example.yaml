@@ -66,15 +66,21 @@ monitors:
       degraded_ratio: 0.5    # Below 50% of expected = degraded
     streams: 4               # concurrent transfers per direction; same at every rung
     timeout_seconds: 60      # total deadline for the download phase and again for
-                             # the upload phase (not per request). On expiry the
-                             # streams are cut short and the bytes that did move are
-                             # reported over the elapsed time, so a link too slow to
-                             # finish reads as slow instead of down.
+                             # the upload phase (not per request); the latency
+                             # phase's 5 probes share one deadline the same way. On
+                             # expiry, a phase that moved at least one byte is cut
+                             # short and the bytes that did move are reported over
+                             # the elapsed time, so a link too slow to finish reads
+                             # as slow instead of down — but a phase that moves zero
+                             # bytes before the deadline fails the run (one `down`
+                             # row) and is not retried.
     # Adaptive cadence. Starts at rung 1 ("watch"). A poor run climbs one
     # rung; `calm_after` consecutive good runs descend one. A run is poor
     # when download < expected * degraded_ratio, or < avg_ratio * the mean
     # of the last 24 h (once min_samples readings exist).
-    # Data per run = streams * (download_bytes + upload_bytes). Held all day:
+    # Data per run = at least streams * (download_bytes + upload_bytes) —
+    # a phase that fails once is retried in full, so a retried phase doubles
+    # its share. Held all day, these are minimums:
     #   calm 2.7 GB, watch 16 GB, alert 100 GB, investigate 200 GB.
     # Cloudflare refuses download_bytes above 50000000. Overriding `ladder`
     # replaces the whole list (lists are not deep-merged).

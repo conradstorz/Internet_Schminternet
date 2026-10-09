@@ -39,7 +39,10 @@ Fully async on `httpx.AsyncClient`. No thread executor; the old
 
 - **Latency** — median of 5 round-trips to `__down?bytes=0`. Up to two
   probes may fail (error or non-2xx) and are simply dropped from the
-  median; fewer than three survivors fails the run.
+  median; fewer than three survivors fails the run. The whole probe loop
+  runs under the same per-phase `timeout_seconds` deadline as the download
+  and upload phases, so slow or hanging probes cannot cost more than one
+  deadline window in total.
 - **Download** — `streams` concurrent GETs of `__down?bytes=<download_bytes>`,
   bodies streamed and discarded. Mbps = total bytes × 8 / wall time from
   first request start to last stream end / 1e6.
@@ -64,13 +67,18 @@ so logs and the dashboard show which tier a number came from.
 `download_mbps` row with `value = -1.0`, `status = "down"`, and the
 exception text, exactly as today. `timeout_seconds` is a per-phase *total*
 deadline — the download phase gets that long in whole, and the upload phase
-again — rather than a per-request bound. Reaching the deadline does **not**
-fail the run: the in-flight streams are cancelled and the phase reports the
-bytes actually transferred divided by the elapsed time, so a link too slow
-to finish the configured transfer reads as slow (and the policy's verdict
-turns "poor", escalating the ladder) instead of as down. The pool-warming
-requests sit outside the deadline, so handshakes neither land in the timed
-window nor consume it.
+again, and the latency phase shares one deadline across all 5 probes rather
+than tolerating a timeout per probe — rather than a per-request bound.
+Reaching the deadline does not unconditionally fail the run: a phase that
+has moved at least one byte reports the bytes actually transferred divided
+by the elapsed time, so a link too slow to finish the configured transfer
+reads as slow (and the policy's verdict turns "poor", escalating the
+ladder) instead of as down. A phase that reaches the deadline having moved
+zero bytes, however, is a failure — one `down` row, not a 0.0 Mbps
+reading — and that path is not retried (retrying would double the
+worst-case time a dead link ties up the phase). The pool-warming requests
+sit outside the deadline, so handshakes neither land in the timed window
+nor consume it.
 
 ## Intensity ladder
 

@@ -42,9 +42,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # stay comparable — one TCP window cannot fill a fast link.
             "streams": 4,
             # Total deadline for the download phase and again for the upload
-            # phase, not a per-request timeout. On expiry the streams are cut
-            # short and the bytes that did move are reported over the elapsed
-            # time, so a link too slow to finish reads as slow, not down.
+            # phase, not a per-request timeout; the latency phase's probes
+            # share one deadline the same way. On expiry, a phase that moved
+            # at least one byte is cut short and the bytes that did move are
+            # reported over the elapsed time, so a link too slow to finish
+            # reads as slow, not down — but a phase that moves zero bytes
+            # before the deadline fails the run (one down row) and is not
+            # retried.
             "timeout_seconds": 60,
             # Adaptive cadence. The job starts at rung 1, climbs one rung on
             # a poor run, and descends one rung after `calm_after` consecutive
