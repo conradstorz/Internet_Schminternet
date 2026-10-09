@@ -988,7 +988,10 @@ Replace the `add_job` line for speedtest:
 with:
 
 ```python
-    scheduler.add_job(job_speedtest, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60)
+    # Bound method, not the instance: APScheduler's coroutine detection
+    # (iscoroutinefunction) does not see an instance's async __call__ and
+    # would run it in a thread, silently dropping the coroutine.
+    scheduler.add_job(job_speedtest.__call__, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
 ```
 
 `speed_cfg` is no longer used after this change; delete the line `speed_cfg    = config["monitors"]["speedtest"]`.
