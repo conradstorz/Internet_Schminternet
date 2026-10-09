@@ -657,7 +657,11 @@ async def main() -> None:
 
     scheduler.add_job(job_ping,      "interval", seconds=ping_cfg.get("interval_seconds", 30),    id="ping",      misfire_grace_time=15)
     scheduler.add_job(job_dns,       "interval", seconds=dns_cfg.get("interval_seconds", 60),     id="dns",       misfire_grace_time=30)
-    scheduler.add_job(job_speedtest, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
+    # Pass the bound method, not the instance: APScheduler's AsyncIOExecutor uses
+    # iscoroutinefunction_partial(job.func) to decide whether to await the job, and
+    # that check returns False for an instance's async __call__, silently sending it
+    # to a thread where the returned coroutine is never awaited or run.
+    scheduler.add_job(job_speedtest.__call__, "interval", seconds=job_speedtest.interval_seconds, id="speedtest", misfire_grace_time=60, max_instances=1, coalesce=True)
     scheduler.add_job(job_http,      "interval", seconds=http_cfg.get("interval_seconds", 120),   id="http",      misfire_grace_time=30)
     scheduler.add_job(job_ip,        "interval", seconds=ip_cfg.get("interval_seconds", 300),     id="ip",        misfire_grace_time=60)
     scheduler.add_job(job_cleanup,   "cron",     hour=3,                                           id="cleanup")
