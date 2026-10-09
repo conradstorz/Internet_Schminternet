@@ -201,7 +201,39 @@ async def test_latency_tolerates_two_failed_probes():
     assert "ping_ms" in rows
     assert rows["ping_ms"].value >= 0
     assert rows["ping_ms"].status == "ok"
-    assert rows["download_mbps"].status == "ok"
+
+
+class SlowProbe:
+    """Delays every zero-byte GET past the phase deadline, so the latency
+    loop never gets through all 5 probes on its own."""
+
+    def __init__(self, delay: float):
+        self.delay = delay
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/__down":
+            await asyncio.sleep(self.delay)
+            return httpx.Response(200, content=b"")
+        return httpx.Response(404)
+
+
+async def test_latency_phase_has_its_own_deadline():
+    """Five slow probes must not tie the run up for 5x timeout_seconds —
+    the whole latency phase shares one deadline, same as the transfer
+    phases."""
+    timeout_seconds = 0.2
+    handler = SlowProbe(delay=timeout_seconds * 3)
+    started = time.perf_counter()
+    results = await speedtest.run(_config(streams=2, timeout_seconds=timeout_seconds), PARAMS,
+                                  transport=httpx.MockTransport(handler))
+    elapsed = time.perf_counter() - started
+    assert len(results) == 1
+    row = results[0]
+    assert row.metric == "download_mbps"
+    assert row.value == -1.0
+    assert row.status == "down"
+    assert "probes succeeded" in row.message
+    assert elapsed < 2 * timeout_seconds
 
 
 async def test_latency_fails_the_run_when_three_probes_fail():

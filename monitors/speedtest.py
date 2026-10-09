@@ -72,22 +72,30 @@ def _run_label(params: dict, streams: int) -> str:
     return f"level={params['level']} {params['name']} {streams}x{dl}MB/{streams}x{ul}MB"
 
 
-async def _measure_latency(client: httpx.AsyncClient) -> float:
+async def _measure_latency(client: httpx.AsyncClient, timeout_seconds: float) -> float:
     """Median round-trip of small requests, in milliseconds.
 
     A probe that errors or answers non-2xx is dropped rather than failing the
     whole measurement; the median of the survivors is still representative as
-    long as most of them came back.
+    long as most of them came back. The whole probe loop shares one deadline:
+    httpx.ReadTimeout is itself an httpx.HTTPError the loop already tolerates,
+    so without this the phase has no total deadline of its own and five
+    timed-out probes can cost 5x timeout_seconds before the transfer phases
+    even start.
     """
     samples: list[float] = []
-    for _ in range(_LATENCY_SAMPLES):
-        start = time.perf_counter()
-        try:
-            resp = await client.get(_DOWN, params={"bytes": 0})
-            resp.raise_for_status()
-        except httpx.HTTPError:
-            continue
-        samples.append((time.perf_counter() - start) * 1000)
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            for _ in range(_LATENCY_SAMPLES):
+                start = time.perf_counter()
+                try:
+                    resp = await client.get(_DOWN, params={"bytes": 0})
+                    resp.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+                samples.append((time.perf_counter() - start) * 1000)
+    except TimeoutError:
+        pass
     if len(samples) < _LATENCY_MIN_OK:
         raise RuntimeError(
             f"latency: only {len(samples)}/{_LATENCY_SAMPLES} probes succeeded"
@@ -220,7 +228,7 @@ async def run(
         limits = httpx.Limits(max_connections=streams, max_keepalive_connections=streams)
         async with httpx.AsyncClient(timeout=timeout, limits=limits,
                                      transport=transport) as client:
-            ping = await _measure_latency(client)
+            ping = await _measure_latency(client, timeout)
             download = await _measure_download(
                 client, streams, int(params["download_bytes"]), timeout
             )
