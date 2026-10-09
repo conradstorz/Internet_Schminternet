@@ -96,6 +96,28 @@ async def query_recent(monitor: str, hours: int = 24) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def recent_values(monitor: str, target: str, metric: str, hours: int = 24) -> list[float]:
+    """Successful readings (value >= 0) for one series inside the window,
+    oldest first. Used by the adaptive speedtest policy for its rolling mean;
+    the target filter keeps readings from a previous provider out of it."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT value
+            FROM   metrics
+            WHERE  monitor = ?
+              AND  target = ?
+              AND  metric = ?
+              AND  value >= 0
+              AND  timestamp > datetime('now', ? || ' hours')
+            ORDER BY timestamp ASC
+            """,
+            (monitor, target, metric, f"-{hours}"),
+        )
+        rows = await cursor.fetchall()
+        return [float(r[0]) for r in rows]
+
+
 async def get_current_status() -> list[dict]:
     """Return the latest row for every (monitor, target, metric) combination."""
     async with aiosqlite.connect(_DB_PATH) as db:
