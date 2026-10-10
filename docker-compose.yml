@@ -12,8 +12,9 @@ services:
       - /opt/schminternet/data:/app/data
       # Defaults in config.py are already correct for headless operation
       # (LEDs off, email off). To set SMTP credentials or thresholds, create
-      # /opt/schminternet/config.yaml ON hpz440 and uncomment:
-      # - /opt/schminternet/config.yaml:/app/config.yaml:ro
+      # /opt/schminternet/config.yaml ON hpz440 (mounted below; the file must
+      # exist or the container will not start):
+      - /opt/schminternet/config.yaml:/app/config.yaml:ro
     # Graceful shutdown writes shutdown_at, so a restart is classified as clean.
     stop_grace_period: 30s
     labels:
