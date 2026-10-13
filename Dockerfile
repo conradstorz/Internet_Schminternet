@@ -6,9 +6,11 @@
 
 FROM python:3.13-slim
 
-# monitors/ping.py shells out to the system ping binary.
+# monitors/ping.py and monitors/gateway.py shell out to the system ping
+# binary; monitors/path_trace.py runs mtr (the container runs as root, so
+# mtr's raw sockets work).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iputils-ping ca-certificates \
+ && apt-get install -y --no-install-recommends iputils-ping mtr-tiny ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

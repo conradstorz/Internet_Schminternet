@@ -15,7 +15,22 @@ monitors:
                           # DNS problem rather than a connectivity problem.
       - "wikipedia.org"   # Popular site on real origin hosting (not a nearby CDN edge)
       - "kernel.org"      # Less popular, longer path — exercises a different route
-      # - "192.168.1.1" # Your router gateway (uncomment and adjust)
+    # LAN gateway leg — don't list your router under targets; it is pinged
+    # separately (same poll, no extra time) as "gateway <addr>" so a failing
+    # poll can say whether the fault is on your LAN/router or beyond it
+    # (modem/ISP). "auto" walks TTL-limited pings toward the first IP target
+    # and takes the last private hop before the public internet (works inside
+    # Docker, where the default route is only the bridge). Linux only; detected
+    # once at startup. Use an explicit address, or null to disable.
+    gateway: auto
+    # Path trace: when ping first goes degraded/down (from ok), run mtr once in
+    # the background (traceroute if mtr is missing) and record where loss
+    # begins as a "path_trace" event. Needs mtr-tiny installed.
+    trace:
+      enabled: true
+      # target: "1.1.1.1"     # default: the first ping target
+      cycles: 10              # probes per hop
+      cooldown_minutes: 15    # at most one trace per window (from trace start)
     interval_seconds: 30
     count: 5
     # Degraded alerting (opt-in): omit both keys to disable it for this monitor.
