@@ -197,6 +197,36 @@ Both are Linux-only and silently off elsewhere.
 
 ---
 
+## Status damping and the event log
+
+Each poll produces a **raw** status per monitor (worst target wins). Under
+moderate packet loss that raw status is a coin flip: 5 ping probes per target
+give loss in 20% steps, so a true ~40% loss lands on degraded or down at
+random each poll, and DNS queries are simply lost or not. Every flip used to be
+a transition — an event row, an SSE push, and a fresh `down` entry.
+
+So each monitor also has an **effective** status, which is what the event
+log, alerts, degraded-alert accumulation, the path-trace trigger and the
+dashboard's live status follow:
+
+- **Getting worse is immediate.** The first `down` alert is never delayed.
+- **Getting better needs `recover_polls` consecutive better polls**
+  (`monitors.<name>.recover_polls`; 3 for ping and DNS, 2 for the rest). It
+  then lands on the *worst* status seen while confirming, so `down`,
+  `degraded`, `ok` with `recover_polls: 3` recovers to `degraded`, not `ok`.
+  Any poll that isn't better restarts the count. Set 1 to turn damping off.
+
+Metric rows (charts) and LED scores keep the raw per-poll values. The log's
+per-poll summary line shows the raw status and appends `(holding down)` while
+the effective status is being held. Pending confirmation is in memory only; a
+restart starts from `unknown`, which the first poll replaces immediately.
+
+A degraded → down transition writes a single `status_change` row (the one
+carrying the failure detail); its previous status records the end of the
+degraded episode.
+
+---
+
 ## Notes
 
 - The speedtest monitor is async (httpx against speed.cloudflare.com), so it

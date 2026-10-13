@@ -33,6 +33,15 @@ monitors:
       cooldown_minutes: 15    # at most one trace per window (from trace start)
     interval_seconds: 30
     count: 5
+    # Recovery hysteresis (every monitor has this key). The monitor's
+    # effective status — what drives events, alerts and the dashboard status —
+    # gets worse at once, but only gets better after this many consecutive
+    # better polls, and then lands on the worst status seen while confirming
+    # (down, degraded, ok with 3 lands on degraded). With 5 probes per target,
+    # per-poll loss comes in 20% steps, so at a true ~40% loss ping would
+    # otherwise flip degraded <-> down every poll. 1 (or 0) = undamped.
+    # Default 3 for ping and DNS, 2 for the others.
+    recover_polls: 3
     # Degraded alerting (opt-in): omit both keys to disable it for this monitor.
     # Either threshold fires on its own; with both set, whichever is crossed first wins.
     # degraded_alert_minutes: 10   # Alert after 10 minutes continuously degraded
@@ -58,6 +67,7 @@ monitors:
     # round trip. Set false to query test_domain verbatim instead.
     randomize_query: true
     interval_seconds: 60
+    recover_polls: 3         # each UDP query is lost or not — see ping above
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_minutes: 5     # Minutes alone is enough; cycles may stay unset
     thresholds:
@@ -71,6 +81,7 @@ monitors:
     # below to drive the ladder (and _determine_status always "ok").
     expected_download_mbps: 50
     expected_upload_mbps: 10
+    recover_polls: 2         # see ping above; polls here are minutes apart
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_cycles: 3      # Cycles alone is enough; minutes may stay unset
     # For speedtest, a "cycle" is one poll and the poll interval now moves
@@ -116,6 +127,7 @@ monitors:
       # Add any URLs you want to check reachability for
     interval_seconds: 120
     timeout_seconds: 10
+    recover_polls: 2         # see ping above
     # Degraded alerting (opt-in) — see the ping section above for details.
     # degraded_alert_minutes: 10
     # degraded_alert_cycles: 5
@@ -124,11 +136,13 @@ monitors:
 
   ip:
     interval_seconds: 300    # Check for IP changes every 5 minutes
-    # ip's "degraded" lasts exactly one poll (set only on the poll where the
-    # external IP changed; the next poll is back to "ok"), so any
-    # degraded_alert_cycles above 1, and any degraded_alert_minutes, can
-    # never be reached — only degraded_alert_cycles: 1 (alerting on every
-    # single IP change) would ever fire.
+    recover_polls: 2         # see ping above
+    # ip's raw "degraded" lasts exactly one poll (set only on the poll where
+    # the external IP changed; the next poll is back to "ok"). Recovery
+    # hysteresis then holds the effective status at degraded for
+    # recover_polls polls in total (the change poll plus recover_polls - 1
+    # held ok polls), so degraded_alert_cycles above recover_polls can never
+    # be reached — set degraded_alert_cycles: 1 to alert on every IP change.
 
 database:
   path: "data/schminternet.db"
