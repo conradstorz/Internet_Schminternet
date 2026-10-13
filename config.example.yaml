@@ -29,7 +29,7 @@ monitors:
     trace:
       enabled: true
       # target: "1.1.1.1"     # default: the first ping target
-      cycles: 10              # probes per hop
+      cycles: 20              # probes per hop (fewer = noisier per-hop loss)
       cooldown_minutes: 15    # at most one trace per window (from trace start)
     interval_seconds: 30
     count: 5

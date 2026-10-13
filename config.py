@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "trace": {
                 "enabled": True,
                 "target": None,
-                "cycles": 10,
+                "cycles": 20,             # 10 proved too noisy per hop
                 "cooldown_minutes": 15,
             },
         },

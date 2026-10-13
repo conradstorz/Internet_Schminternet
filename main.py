@@ -579,7 +579,7 @@ def _maybe_trace(monitor_name: str, previous: str, new_status: str) -> Optional[
 
     targets = ping_cfg.get("targets") or ["1.1.1.1"]
     target = trace_cfg.get("target") or targets[0]
-    cycles = int(trace_cfg.get("cycles", 10))
+    cycles = int(trace_cfg.get("cycles", 20))
 
     _last_trace_started = now
     _trace_task = asyncio.create_task(_run_path_trace(target, cycles, previous, new_status))

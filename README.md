@@ -78,7 +78,7 @@ Key settings to review:
 
 - `monitors.ping.targets` — internet hosts to ping (your router is pinged separately — see `monitors.ping.gateway`)
 - `monitors.ping.gateway` — `auto` (default, Linux only), an explicit router address, or `null` to disable
-- `monitors.ping.trace` — onset path trace (`enabled`, `target`, `cycles`, `cooldown_minutes`)
+- `monitors.ping.trace` — onset path trace (`enabled`, `target`, `cycles` — default 20 probes per hop, `cooldown_minutes`)
 - `monitors.speedtest.expected_download_mbps` — your expected plan speed
 - `leds.enabled` — set `true` when LED strip is connected
 - `leds.count` — total number of LEDs on your strip

@@ -56,7 +56,7 @@ async def test_onset_fires_and_records_event(runner, caplog):
         assert task is not None
         await task
 
-    assert runner == [("1.1.1.1", 10)]
+    assert runner == [("1.1.1.1", 20)]
     events = await _trace_events()
     assert len(events) == 1
     ev = events[0]

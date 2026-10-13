@@ -100,18 +100,33 @@ def _parse_traceroute(report: str) -> list[Hop]:
 
 
 def _culprit(hops: list[Hop]) -> Optional[Hop]:
-    """First hop k such that every answering hop from k to the end has loss
-    >= half the final hop's loss. A silent (???) hop is only named when no
-    later hop answers — otherwise the next answering hop speaks for it."""
-    final_loss = hops[-1][2]
-    floor = final_loss / 2
+    """Where loss begins, anchored on the final hop's loss.
+
+    With half = final_loss / 2, the culprit is the first answering hop k whose
+    own loss >= half and for which a strict majority (> 50%) of the answering
+    hops from k to the end also have loss >= half. A majority rather than
+    "every hop" because with few cycles per-hop loss is noisy: one lucky
+    downstream hop must not push the blame onto the destination. A lone
+    ICMP-rate-limited middle hop fails the majority test because the hops
+    after it are clean.
+
+    If no answering hop qualifies but the path ends in silent (???) hops —
+    the destination never answered — the first silent hop after the last
+    answering router is named.
+    """
+    half = hops[-1][2] / 2
     for i, hop in enumerate(hops):
-        rest = hops[i:]
-        answering = [h for h in rest if h[1] != SILENT]
-        if hop[1] == SILENT and answering:
+        if hop[1] == SILENT or hop[2] < half:
             continue
-        if all(h[2] >= floor for h in answering):
+        answering = [h for h in hops[i:] if h[1] != SILENT]
+        lossy = sum(1 for h in answering if h[2] >= half)
+        if lossy * 2 > len(answering):
             return hop
+    if hops[-1][1] == SILENT:
+        last_answering = max(
+            (i for i, h in enumerate(hops) if h[1] != SILENT), default=-1
+        )
+        return hops[last_answering + 1]
     return None
 
 

@@ -45,6 +45,42 @@ HOST: pi                          Loss%   Snt   Last   Avg  Best  Wrst StDev
 # Destination never answers: trailing ??? rows. The final row's loss (100%)
 # is the destination loss, and loss "begins" at the first silent hop after
 # the last router that answered.
+# Live 10-cycle run from hpz440, 2026-10-13 ~21:00 UTC. Per-hop loss is noisy
+# at 10 cycles (hops 8-9 read 20%/10%); an "every hop" rule blamed the
+# destination. Loss begins at hop 2.
+LIVE_NOISY_REPORT = """\
+Start: 2026-10-13T21:00:00+0000
+HOST: hpz440                      Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 192.168.86.1               0.0%    10    0.5   0.5   0.4   0.6   0.1
+  2.|-- 142.254.146.181           40.0%    10   15.1  17.4   9.0  26.9   6.5
+  3.|-- 74.128.4.21               20.0%    10   25.6  73.9  25.6 199.1  66.1
+  4.|-- 24.29.0.48                40.0%    10   13.7  16.1   9.7  26.3   5.7
+  5.|-- 65.29.28.54               60.0%    10   13.3  15.5  10.6  25.4   5.1
+  6.|-- 65.189.140.166            60.0%    10   22.1  28.8  21.3  55.2   8.7
+  7.|-- 65.29.39.110              30.0%    10   36.1  27.0  22.4  37.6   4.3
+  8.|-- 65.29.33.239              20.0%    10   25.4  30.2  24.1  42.4   5.4
+  9.|-- 172.69.174.2              10.0%    10   24.2  32.7  23.1  64.3  10.5
+ 10.|-- 1.1.1.1                   60.0%    10   25.6  28.8  22.7  44.0   6.2
+"""
+
+# A middle router rate-limits ICMP to itself (hop 3, 100%) while forwarding
+# fine (hops 4-7 clean); real loss starts at hop 8. Hop 3 has only 4 of 8
+# answering hops at >= half the destination loss — not a strict majority.
+RATE_LIMITED_LOSSY_REPORT = """\
+Start: 2026-10-13T21:10:00+0000
+HOST: hpz440                      Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 192.168.86.1               0.0%    20    0.5   0.5   0.4   0.6   0.1
+  2.|-- 142.254.146.181            0.0%    20   15.1  17.4   9.0  26.9   6.5
+  3.|-- 74.128.4.21               100.0%   20    0.0   0.0   0.0   0.0   0.0
+  4.|-- 24.29.0.48                 0.0%    20   13.7  16.1   9.7  26.3   5.7
+  5.|-- 65.29.28.54                0.0%    20   13.3  15.5  10.6  25.4   5.1
+  6.|-- 65.189.140.166             0.0%    20   22.1  28.8  21.3  55.2   8.7
+  7.|-- 65.29.39.110               0.0%    20   36.1  27.0  22.4  37.6   4.3
+  8.|-- 65.29.33.239              40.0%    20   25.4  30.2  24.1  42.4   5.4
+  9.|-- 172.69.174.2              40.0%    20   24.2  32.7  23.1  64.3  10.5
+ 10.|-- 1.1.1.1                   40.0%    20   25.6  28.8  22.7  44.0   6.2
+"""
+
 DEAD_PATH_REPORT = """\
 HOST: hpz440                      Loss%   Snt   Last   Avg  Best  Wrst StDev
   1.|-- 192.168.86.1               0.0%    10    0.5   0.5   0.4   0.6   0.1
@@ -81,6 +117,31 @@ class TestAnalyseMtr:
         a = analyse_mtr(LAN_LOSS_REPORT)
         assert a["clean"] is False
         assert a["culprit"] == (1, "192.168.86.1", 50.0)
+
+    def test_live_noisy_report_culprit_is_hop_2_not_destination(self):
+        a = analyse_mtr(LIVE_NOISY_REPORT)
+        assert a["clean"] is False
+        assert a["culprit"] == (2, "142.254.146.181", 40.0)
+
+    def test_rate_limited_router_before_real_loss_is_not_blamed(self):
+        a = analyse_mtr(RATE_LIMITED_LOSSY_REPORT)
+        assert a["hops"][2] == (3, "74.128.4.21", 100.0)
+        assert a["culprit"] == (8, "65.29.33.239", 40.0)
+
+    def test_lossy_destination_alone_is_named(self):
+        # Every hop before the destination is clean, so the destination itself
+        # is the first hop meeting both conditions.
+        report = (
+            "HOST: x  Loss%   Snt   Last   Avg  Best  Wrst StDev\n"
+            "  1.|-- 192.168.86.1   0.0%  10  0.5 0.5 0.4 0.6 0.1\n"
+            "  2.|-- 1.1.1.1       40.0%  10  1.0 1.0 1.0 1.0 0.0\n"
+        )
+        assert analyse_mtr(report)["culprit"] == (2, "1.1.1.1", 40.0)
+
+    def test_unclear_summary_when_no_culprit(self):
+        analysis = {"hops": [(1, "192.168.86.1", 0.0), (2, "1.1.1.1", 40.0)],
+                    "culprit": None, "clean": False}
+        assert summarise(analysis) == "Loss origin unclear; destination 40% loss"
 
     def test_dead_path_culprit_is_first_silent_hop(self):
         a = analyse_mtr(DEAD_PATH_REPORT)
