@@ -31,7 +31,7 @@ from config import load_config
 from leds.controller import LEDController
 from leds.quality import overall_score, quality_color_hex, score_monitor
 from monitors import dns as dns_monitor
-from monitors import http_check, ip_tracker, path_trace, ping
+from monitors import http_check, hysteresis, ip_tracker, path_trace, ping
 from monitors import speedtest as speedtest_monitor
 from monitors import speedtest_policy
 from monitors.base import MonitorResult
@@ -176,7 +176,13 @@ def _format_results(results: list[MonitorResult]) -> str:
 # Global shared state
 # ---------------------------------------------------------------------------
 
+# Effective (hysteresis-damped) status per monitor — what transitions, events,
+# alerts, degraded accumulation, the trace trigger and SSE all key off.
 _monitor_status: dict[str, str] = {}
+# Recovery-hysteresis confirmation in progress per monitor: (count of
+# consecutive better polls, worst raw status among them). In memory only; a
+# restart starts from "unknown", which the first raw status replaces at once.
+_monitor_pending: dict[str, tuple[int, Optional[str]]] = {}
 _monitor_configs: dict[str, dict] = {}
 _led: Optional[LEDController] = None
 _alerter: Optional[EmailAlerter] = None
@@ -329,23 +335,33 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
     await db.insert_metrics(results)
 
-    # Derive overall status for this monitor (worst wins)
-    status_priority = {"down": 3, "degraded": 2, "ok": 1, "unknown": 0}
-    new_status = max(
+    # Raw status for this poll (worst wins across its rows).
+    raw_status = max(
         (r.status for r in results),
-        key=lambda s: status_priority.get(s, 0),
+        key=lambda s: hysteresis.SEVERITY.get(s, 0),
         default="unknown",
     )
 
-    # Poll summary — one line per monitor per poll, INFO when ok, WARNING otherwise.
-    logger.log(
-        logging.INFO if new_status == "ok" else logging.WARNING,
-        "%-*s %-*s %s",
-        _NAME_WIDTH, monitor_name, _STATUS_WIDTH, new_status, _format_results(results),
-    )
-
+    # Recovery hysteresis: worsening is immediate, improving needs
+    # `recover_polls` consecutive better polls. Everything below keys off the
+    # effective status; metric rows above keep their own raw statuses.
     previous = _monitor_status.get(monitor_name, "unknown")
+    pending_count, pending_worst = _monitor_pending.get(monitor_name, hysteresis.IDLE)
+    recover_polls = (_monitor_configs.get(monitor_name) or {}).get("recover_polls")
+    new_status, pending_count, pending_worst = hysteresis.step(
+        previous, pending_count, pending_worst, raw_status, recover_polls
+    )
     _monitor_status[monitor_name] = new_status
+    _monitor_pending[monitor_name] = (pending_count, pending_worst)
+
+    # Poll summary — one line per monitor per poll, INFO when the raw status
+    # is ok, WARNING otherwise; notes the effective status while it is held.
+    holding = f" (holding {new_status})" if new_status != raw_status else ""
+    logger.log(
+        logging.INFO if raw_status == "ok" else logging.WARNING,
+        "%-*s %-*s %s%s",
+        _NAME_WIDTH, monitor_name, _STATUS_WIDTH, raw_status, _format_results(results), holding,
+    )
 
     # LED update — rank-sorted quality strip. "ip" is excluded: an address
     # change is an event, not a quality measure (leds/quality.py).
@@ -395,19 +411,9 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
     if _alerter and previous != new_status:
         ts = results[0].timestamp
         if new_status == "down":
-            if previous == "degraded":
-                # Log that the degraded episode ended (entered down)
-                await db.insert_event(
-                    {
-                        "timestamp": ts,
-                        "event_type": "status_change",
-                        "monitor": monitor_name,
-                        "description": "Status changed: degraded → down",
-                        "previous_status": "degraded",
-                        "new_status": "down",
-                    }
-                )
-            # Clear any degraded state
+            # Clear any degraded state. A degraded episode ending in down gets
+            # no row of its own: the detailed row below records
+            # previous_status = "degraded".
             await _clear_degraded_state(monitor_name)
 
             # Existing down-alert path (previous != "down" is guaranteed by the

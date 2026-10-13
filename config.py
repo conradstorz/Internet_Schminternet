@@ -13,6 +13,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "targets": ["1.1.1.1", "wikipedia.org", "kernel.org"],
             "interval_seconds": 30,
             "count": 5,
+            # Recovery hysteresis: worsening is immediate, improving needs
+            # this many consecutive better polls (1, 0 or None = undamped).
+            # 3 for ping and DNS, whose per-poll loss is a coin flip at
+            # moderate packet loss. See monitors/hysteresis.py.
+            "recover_polls": 3,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {
@@ -43,6 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "test_domain": "google.com",
             "randomize_query": True,
             "interval_seconds": 60,
+            "recover_polls": 3,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ms": 200, "down_ms": 1000},
@@ -50,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "speedtest": {
             "expected_download_mbps": 0,
             "expected_upload_mbps": 0,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ratio": 0.5},
@@ -91,12 +98,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
             ],
             "interval_seconds": 120,
             "timeout_seconds": 10,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ms": 1000},
         },
         "ip": {
             "interval_seconds": 300,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
         },

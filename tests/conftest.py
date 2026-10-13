@@ -10,7 +10,8 @@ Every test therefore gets:
   * ``monitors.path_trace.run_trace`` stubbed to return ``None`` instantly
     (tests that exercise the trigger re-stub it with their own fake);
   * the gateway detection cache cleared before and after;
-  * ``main``'s trace bookkeeping (in-flight task, cooldown clock) reset.
+  * ``main``'s trace bookkeeping (in-flight task, cooldown clock) reset;
+  * ``main``'s hysteresis pending state (``_monitor_pending``) cleared.
 """
 
 from __future__ import annotations
@@ -34,6 +35,9 @@ def _reset_trace_state() -> None:
         task.cancel()
     main._trace_task = None
     main._last_trace_started = None
+    # Hysteresis pending state is in-memory per monitor; a confirmation count
+    # left over from one test must not leak into the next test's first poll.
+    main._monitor_pending = {}
 
 
 @pytest.fixture(autouse=True)

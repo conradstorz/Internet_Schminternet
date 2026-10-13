@@ -99,6 +99,30 @@ def test_degraded_alert_keys_default_to_none():
         assert monitor["degraded_alert_cycles"] is None
 
 
+def test_recover_polls_defaults():
+    """Every monitor carries recover_polls: 3 for the flappy ping/DNS, else 2."""
+    expected = {"ping": 3, "dns": 3, "speedtest": 2, "http": 2, "ip": 2}
+    assert {
+        name: monitor.get("recover_polls")
+        for name, monitor in DEFAULT_CONFIG["monitors"].items()
+    } == expected
+
+
+def test_recover_polls_override_keeps_other_monitors(tmp_path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        textwrap.dedent("""\
+            monitors:
+              ping:
+                recover_polls: 1
+        """),
+        encoding="utf-8",
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg["monitors"]["ping"]["recover_polls"] == 1
+    assert cfg["monitors"]["dns"]["recover_polls"] == 3
+
+
 def test_degraded_alert_minutes_override(tmp_path):
     """Setting degraded_alert_minutes leaves the cycles key and thresholds untouched."""
     cfg_file = tmp_path / "config.yaml"
