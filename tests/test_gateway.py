@@ -115,6 +115,11 @@ def test_probe_target_first_ip_target():
     assert _probe_target(["wikipedia.org", "9.9.9.9", "1.1.1.1"]) == "9.9.9.9"
 
 
+def test_probe_target_skips_private_targets():
+    assert _probe_target(["192.168.1.1", "10.0.0.1", "8.8.8.8"]) == "8.8.8.8"
+    assert _probe_target(["192.168.1.1"]) == "1.1.1.1"
+
+
 def test_probe_target_falls_back_to_cloudflare():
     assert _probe_target(["wikipedia.org", "kernel.org"]) == "1.1.1.1"
     assert _probe_target([]) == "1.1.1.1"

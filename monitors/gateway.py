@@ -95,11 +95,17 @@ def _choose_gateway(hops: list[Optional[str]]) -> Optional[str]:
 
 
 def _probe_target(targets: list[str]) -> str:
-    """First configured ping target that is a literal IP, else 1.1.1.1."""
+    """First configured ping target that is a literal public IP, else 1.1.1.1.
+
+    A private target (e.g. someone listed their router) would make the walk
+    stop on the LAN, so it is skipped.
+    """
     for target in targets or []:
         try:
             ipaddress.ip_address(target)
         except ValueError:
+            continue
+        if _is_private(target):
             continue
         return target
     return _FALLBACK_PROBE

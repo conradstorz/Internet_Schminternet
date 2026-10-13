@@ -39,6 +39,9 @@ def _reset_trace_state() -> None:
 @pytest.fixture(autouse=True)
 def _isolate_fault_localisation(monkeypatch):
     monkeypatch.setattr(path_trace, "run_trace", lambda *_a, **_kw: None)
+    # gateway.py's only subprocess call: on Linux, any test reaching ping.run
+    # with the default gateway "auto" would otherwise run a real TTL walk.
+    monkeypatch.setattr(gateway, "_ping_once", lambda *_a, **_kw: "")
     gateway.reset()
     _reset_trace_state()
     yield
