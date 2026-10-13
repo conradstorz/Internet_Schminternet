@@ -13,6 +13,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "targets": ["1.1.1.1", "wikipedia.org", "kernel.org"],
             "interval_seconds": 30,
             "count": 5,
+            # Recovery hysteresis: worsening is immediate, improving needs
+            # this many consecutive better polls (1, 0 or None = undamped).
+            # 3 for ping and DNS, whose per-poll loss is a coin flip at
+            # moderate packet loss. See monitors/hysteresis.py.
+            "recover_polls": 3,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {
@@ -21,12 +26,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "loss_degraded_pct": 10,
                 "loss_down_pct": 50,
             },
+            # LAN gateway leg: "auto" (TTL-walk detection, Linux only, once
+            # per process), an explicit address, or None/False to disable.
+            # Pinged alongside the targets as "gateway <addr>" so a non-ok
+            # internet row can say whether the fault is inside or beyond the
+            # router. See monitors/gateway.py.
+            "gateway": "auto",
+            # Background mtr (traceroute fallback) on ping episode onset
+            # (ok/unknown -> degraded/down), recorded as a path_trace event.
+            # target None = the first ping target. Cooldown runs from the last
+            # trace start. See monitors/path_trace.py.
+            "trace": {
+                "enabled": True,
+                "target": None,
+                "cycles": 20,             # 10 proved too noisy per hop
+                "cooldown_minutes": 15,
+            },
         },
         "dns": {
             "servers": ["8.8.8.8", "9.9.9.9"],
             "test_domain": "google.com",
             "randomize_query": True,
             "interval_seconds": 60,
+            "recover_polls": 3,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ms": 200, "down_ms": 1000},
@@ -34,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "speedtest": {
             "expected_download_mbps": 0,
             "expected_upload_mbps": 0,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ratio": 0.5},
@@ -75,12 +98,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
             ],
             "interval_seconds": 120,
             "timeout_seconds": 10,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
             "thresholds": {"degraded_ms": 1000},
         },
         "ip": {
             "interval_seconds": 300,
+            "recover_polls": 2,
             "degraded_alert_minutes": None,
             "degraded_alert_cycles": None,
         },

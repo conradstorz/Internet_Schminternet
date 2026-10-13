@@ -906,6 +906,22 @@ function timelineStatusColor(status) {
   return "var(--unknown)"; // startup, ip_change, anything else
 }
 
+// Marker colour for one event. Only status changes are coloured by their new
+// status: a path_trace event also carries the degraded/down transition that
+// triggered it, but it is diagnostic detail, not a second status change, so
+// it gets the same neutral colour as startup / ip_change.
+function timelineEventColor(ev) {
+  if (ev.event_type === "status_change") return timelineStatusColor(ev.new_status);
+  return "var(--unknown)";
+}
+
+const EVENT_TYPE_LABELS = {
+  status_change: "status change",
+  ip_change: "IP change",
+  path_trace: "path trace",
+  startup: "startup",
+};
+
 function fmtTimelineDate(d) {
   return d.toLocaleString([], {
     hour12: false, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
@@ -930,9 +946,9 @@ function formatEventDetail(ev) {
   return (
     `<div class="tt-event">` +
     `<div class="tt-time">${ts} UTC</div>` +
-    `<div><strong>${ev.monitor}</strong> · ${ev.event_type}</div>` +
+    `<div><strong>${ev.monitor}</strong> · ${EVENT_TYPE_LABELS[ev.event_type] || ev.event_type}</div>` +
     `<div class="tt-transition">${prev} → ${next}</div>` +
-    `<div>${desc}</div>` +
+    `<div class="tt-desc">${desc}</div>` +
     `</div>`
   );
 }
@@ -984,7 +1000,7 @@ function renderTimelineMarkers(track, events, start, end) {
     el.style.left = `${cluster.x}px`;
     el.style.background = isCluster
       ? "var(--muted)"
-      : timelineStatusColor(cluster.events[0].new_status);
+      : timelineEventColor(cluster.events[0]);
     el.tabIndex = 0;
     if (isCluster) el.textContent = String(cluster.events.length);
 

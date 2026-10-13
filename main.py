@@ -15,6 +15,7 @@ import asyncio
 import logging
 import logging.handlers
 import signal
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,7 +31,7 @@ from config import load_config
 from leds.controller import LEDController
 from leds.quality import overall_score, quality_color_hex, score_monitor
 from monitors import dns as dns_monitor
-from monitors import http_check, ip_tracker, ping
+from monitors import http_check, hysteresis, ip_tracker, path_trace, ping
 from monitors import speedtest as speedtest_monitor
 from monitors import speedtest_policy
 from monitors.base import MonitorResult
@@ -175,7 +176,13 @@ def _format_results(results: list[MonitorResult]) -> str:
 # Global shared state
 # ---------------------------------------------------------------------------
 
+# Effective (hysteresis-damped) status per monitor — what transitions, events,
+# alerts, degraded accumulation, the trace trigger and SSE all key off.
 _monitor_status: dict[str, str] = {}
+# Recovery-hysteresis confirmation in progress per monitor: (count of
+# consecutive better polls, worst raw status among them). In memory only; a
+# restart starts from "unknown", which the first raw status replaces at once.
+_monitor_pending: dict[str, tuple[int, Optional[str]]] = {}
 _monitor_configs: dict[str, dict] = {}
 _led: Optional[LEDController] = None
 _alerter: Optional[EmailAlerter] = None
@@ -186,6 +193,23 @@ _alerter: Optional[EmailAlerter] = None
 # between its own polls just because a faster monitor (e.g. ping) just ran.
 _monitor_results: dict[str, list[MonitorResult]] = {}
 _led_weights: dict[str, float] = {}
+
+
+# Path trace on ping episode onset (_maybe_trace). Module-level so the
+# in-flight task is referenced (not garbage-collected) and the cooldown
+# survives across polls. Cooldown is measured from the last trace *start*
+# on the time.monotonic() clock.
+_trace_task: Optional[asyncio.Task] = None
+_last_trace_started: Optional[float] = None
+
+
+def _unique_messages(results: list[MonitorResult]) -> str:
+    """Join non-empty result messages, de-duplicated in first-seen order.
+
+    The ping fault-location hint is attached to every non-ok row (latency and
+    loss, every target), so a plain join would repeat it several times.
+    """
+    return "; ".join(dict.fromkeys(r.message for r in results if r.message))
 
 
 async def _clear_degraded_state(monitor_name: str) -> None:
@@ -311,23 +335,33 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
     await db.insert_metrics(results)
 
-    # Derive overall status for this monitor (worst wins)
-    status_priority = {"down": 3, "degraded": 2, "ok": 1, "unknown": 0}
-    new_status = max(
+    # Raw status for this poll (worst wins across its rows).
+    raw_status = max(
         (r.status for r in results),
-        key=lambda s: status_priority.get(s, 0),
+        key=lambda s: hysteresis.SEVERITY.get(s, 0),
         default="unknown",
     )
 
-    # Poll summary — one line per monitor per poll, INFO when ok, WARNING otherwise.
-    logger.log(
-        logging.INFO if new_status == "ok" else logging.WARNING,
-        "%-*s %-*s %s",
-        _NAME_WIDTH, monitor_name, _STATUS_WIDTH, new_status, _format_results(results),
-    )
-
+    # Recovery hysteresis: worsening is immediate, improving needs
+    # `recover_polls` consecutive better polls. Everything below keys off the
+    # effective status; metric rows above keep their own raw statuses.
     previous = _monitor_status.get(monitor_name, "unknown")
+    pending_count, pending_worst = _monitor_pending.get(monitor_name, hysteresis.IDLE)
+    recover_polls = (_monitor_configs.get(monitor_name) or {}).get("recover_polls")
+    new_status, pending_count, pending_worst = hysteresis.step(
+        previous, pending_count, pending_worst, raw_status, recover_polls
+    )
     _monitor_status[monitor_name] = new_status
+    _monitor_pending[monitor_name] = (pending_count, pending_worst)
+
+    # Poll summary — one line per monitor per poll, INFO when the raw status
+    # is ok, WARNING otherwise; notes the effective status while it is held.
+    holding = f" (holding {new_status})" if new_status != raw_status else ""
+    logger.log(
+        logging.INFO if raw_status == "ok" else logging.WARNING,
+        "%-*s %-*s %s%s",
+        _NAME_WIDTH, monitor_name, _STATUS_WIDTH, raw_status, _format_results(results), holding,
+    )
 
     # LED update — rank-sorted quality strip. "ip" is excluded: an address
     # change is an event, not a quality measure (leds/quality.py).
@@ -370,28 +404,21 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             monitor_name, previous, new_status,
         )
 
+    # Path trace on episode onset — independent of whether email is configured.
+    _maybe_trace(monitor_name, previous, new_status)
+
     # ── Transition-based alerts ────────────────────────────────────────────
     if _alerter and previous != new_status:
         ts = results[0].timestamp
         if new_status == "down":
-            if previous == "degraded":
-                # Log that the degraded episode ended (entered down)
-                await db.insert_event(
-                    {
-                        "timestamp": ts,
-                        "event_type": "status_change",
-                        "monitor": monitor_name,
-                        "description": "Status changed: degraded → down",
-                        "previous_status": "degraded",
-                        "new_status": "down",
-                    }
-                )
-            # Clear any degraded state
+            # Clear any degraded state. A degraded episode ending in down gets
+            # no row of its own: the detailed row below records
+            # previous_status = "degraded".
             await _clear_degraded_state(monitor_name)
 
             # Existing down-alert path (previous != "down" is guaranteed by the
             # outer guard, since previous != new_status and new_status == "down")
-            desc = "; ".join(r.message for r in results if r.message) or "No detail"
+            desc = _unique_messages(results) or "No detail"
             await _alerter.send_alert(monitor_name, desc, new_status, previous, ts)
             await db.insert_event(
                 {
@@ -503,7 +530,7 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
 
             if minutes_hit or cycles_hit:
                 duration_str = f"{int(elapsed_minutes)}m ({cycles} polls)"
-                desc = "; ".join(r.message for r in results if r.message) or "No detail"
+                desc = _unique_messages(results) or "No detail"
                 alert_in_flight = await _alerter.send_degraded_alert(
                     monitor_name, desc, ts, duration_str, onset
                 )
@@ -523,6 +550,74 @@ async def run_monitor(monitor_name: str, results: list[MonitorResult]) -> None:
             ],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Path trace on ping episode onset
+# ---------------------------------------------------------------------------
+
+def _maybe_trace(monitor_name: str, previous: str, new_status: str) -> Optional[asyncio.Task]:
+    """Start a background path trace when a ping episode begins.
+
+    Fires only for ``ping``, only on onset (ok/unknown -> degraded/down, not
+    degraded<->down flips), at most once per ``trace.cooldown_minutes`` since
+    the last trace *start*, and never while one is still running. Returns the
+    task it created (so tests can await it), else None.
+    """
+    global _trace_task, _last_trace_started
+
+    if monitor_name != "ping":
+        return None
+    if previous not in ("ok", "unknown") or new_status not in ("degraded", "down"):
+        return None
+
+    ping_cfg = _monitor_configs.get("ping", {}) or {}
+    trace_cfg = ping_cfg.get("trace") or {}
+    if not trace_cfg.get("enabled", True):
+        return None
+    if _trace_task is not None and not _trace_task.done():
+        return None
+
+    cooldown_s = float(trace_cfg.get("cooldown_minutes", 15)) * 60
+    now = time.monotonic()
+    if _last_trace_started is not None and now - _last_trace_started < cooldown_s:
+        return None
+
+    targets = ping_cfg.get("targets") or ["1.1.1.1"]
+    target = trace_cfg.get("target") or targets[0]
+    cycles = int(trace_cfg.get("cycles", 20))
+
+    _last_trace_started = now
+    _trace_task = asyncio.create_task(_run_path_trace(target, cycles, previous, new_status))
+    return _trace_task
+
+
+async def _run_path_trace(target: str, cycles: int, previous: str, new_status: str) -> None:
+    """Run one trace in the executor and record it as a ``path_trace`` event.
+
+    Never raises: any failure is logged.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(None, path_trace.run_trace, target, cycles)
+        if not report:
+            logger.info("Path trace to %s unavailable (no mtr/traceroute, or not Linux)", target)
+            return
+        analysis = path_trace.analyse_mtr(report)
+        summary = path_trace.summarise(analysis)
+        logger.warning("Path trace to %s: %s", target, summary)
+        await db.insert_event(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_type": "path_trace",
+                "monitor": "ping",
+                "description": f"{summary}\n{path_trace.compact_hops(analysis)}",
+                "previous_status": previous,
+                "new_status": new_status,
+            }
+        )
+    except Exception:
+        logger.exception("Path trace to %s failed", target)
 
 
 # ---------------------------------------------------------------------------

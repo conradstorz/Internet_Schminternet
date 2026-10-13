@@ -68,6 +68,12 @@ def _score_ping(results: list[MonitorResult], cfg: dict) -> float:
 
     by_target: dict[str, dict[str, float]] = {}
     for r in results:
+        # The LAN gateway leg ("gateway 192.168.86.1") is a fault-location
+        # probe, not an internet quality measure: a perfect sub-millisecond
+        # LAN hop would dilute the score. A dead gateway still drives ping
+        # status to down, and the internet targets then score 0 anyway.
+        if r.target.startswith("gateway"):
+            continue
         by_target.setdefault(r.target, {})[r.metric] = r.value
 
     if not by_target:

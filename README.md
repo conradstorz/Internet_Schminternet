@@ -9,7 +9,7 @@ connection and displays the status on a WS2812B LED strip and a local web dashbo
 
 | Monitor | What it measures | Default interval |
 |---|---|---|
-| **Ping** | Latency (ms) + packet loss % to configurable hosts | 30 s |
+| **Ping** | Latency (ms) + packet loss % to configurable hosts, plus your LAN gateway to tell a router fault from an ISP fault | 30 s |
 | **DNS** | Resolution time against specific nameservers | 60 s |
 | **HTTP** | Response time + reachability of configurable URLs | 120 s |
 | **Speedtest** | Download / upload Mbps via speed.cloudflare.com | adaptive, 1–30 min |
@@ -63,7 +63,7 @@ pip install -r requirements.txt
 Install the LED library on the Pi (requires system build tools):
 
 ```bash
-sudo apt update && sudo apt install -y python3-dev swig gcc
+sudo apt update && sudo apt install -y python3-dev swig gcc mtr-tiny
 pip install rpi-ws281x
 ```
 
@@ -76,7 +76,9 @@ nano config.yaml   # fill in your targets, SMTP credentials, LED settings
 
 Key settings to review:
 
-- `monitors.ping.targets` — hosts to ping (add your router IP)
+- `monitors.ping.targets` — internet hosts to ping (your router is pinged separately — see `monitors.ping.gateway`)
+- `monitors.ping.gateway` — `auto` (default, Linux only), an explicit router address, or `null` to disable
+- `monitors.ping.trace` — onset path trace (`enabled`, `target`, `cycles` — default 20 probes per hop, `cooldown_minutes`)
 - `monitors.speedtest.expected_download_mbps` — your expected plan speed
 - `leds.enabled` — set `true` when LED strip is connected
 - `leds.count` — total number of LEDs on your strip
@@ -168,6 +170,60 @@ hue 120° (green) through yellow and orange down to 0° (pure red):
 No hardware? `GET /api/quality` returns the same scores, ranking, and hex
 colours the strip would show, and the dashboard renders a compact preview
 row in the same ranked order.
+
+---
+
+## Fault localisation
+
+When ping goes bad, two things tell you *where*:
+
+- **LAN gateway leg.** Every ping poll also pings your router (target
+  `gateway <addr>`, auto-detected once at startup by walking TTL-limited pings
+  toward the internet and taking the last private hop — this finds the real
+  LAN router even inside Docker, where the default route is only the bridge).
+  Each failing internet target then carries a one-line hint, shown in alert
+  emails and the event log: `LAN gateway 192.168.86.1 ok (0% loss) — fault is
+  beyond your router (modem/ISP)`, or `... — fault is on the local network or
+  router`. Gateway rows don't count toward the LED ping score.
+- **Path trace on onset.** When ping first goes from ok to degraded/down, an
+  `mtr` report (traceroute if mtr is missing) runs once in the background —
+  at most once per `cooldown_minutes` — and lands in the event timeline as a
+  `path_trace` event: `Loss begins at hop 2 (142.254.146.181, 40%);
+  destination 40% loss`, followed by the hop list. Loss is anchored on the
+  destination, so a router that merely rate-limits ICMP to itself is not
+  blamed. Requires `mtr-tiny` (installed in the Docker image).
+
+Both are Linux-only and silently off elsewhere.
+
+---
+
+## Status damping and the event log
+
+Each poll produces a **raw** status per monitor (worst target wins). Under
+moderate packet loss that raw status is a coin flip: 5 ping probes per target
+give loss in 20% steps, so a true ~40% loss lands on degraded or down at
+random each poll, and DNS queries are simply lost or not. Every flip used to be
+a transition — an event row, an SSE push, and a fresh `down` entry.
+
+So each monitor also has an **effective** status, which is what the event
+log, alerts, degraded-alert accumulation, the path-trace trigger and the
+dashboard's live status follow:
+
+- **Getting worse is immediate.** The first `down` alert is never delayed.
+- **Getting better needs `recover_polls` consecutive better polls**
+  (`monitors.<name>.recover_polls`; 3 for ping and DNS, 2 for the rest). It
+  then lands on the *worst* status seen while confirming, so `down`,
+  `degraded`, `ok` with `recover_polls: 3` recovers to `degraded`, not `ok`.
+  Any poll that isn't better restarts the count. Set 1 to turn damping off.
+
+Metric rows (charts) and LED scores keep the raw per-poll values. The log's
+per-poll summary line shows the raw status and appends `(holding down)` while
+the effective status is being held. Pending confirmation is in memory only; a
+restart starts from `unknown`, which the first poll replaces immediately.
+
+A degraded → down transition writes a single `status_change` row (the one
+carrying the failure detail); its previous status records the end of the
+degraded episode.
 
 ---
 

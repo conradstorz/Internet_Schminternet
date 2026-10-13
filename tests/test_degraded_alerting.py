@@ -211,13 +211,19 @@ async def test_degraded_to_down_clears_state_and_logs_event(env):
     ping_events = [e for e in events if e["monitor"] == "ping"]
     descriptions = [e["description"] for e in ping_events]
 
-    # The episode-end event (logged only when previous == "degraded", inside
-    # the new_status == "down" branch) has this exact, message-independent
-    # description. A status-pair assertion would not distinguish it from the
-    # down-alert's own event (previous_status/new_status are identical for
-    # both), so pin the literal string main.py writes.
-    assert "Status changed: degraded → down" in descriptions
-    assert len(ping_events) == 2
+    # Exactly one degraded -> down row: the detailed one every -> down
+    # transition writes. Its previous_status already records the end of the
+    # degraded episode, so the old bare "Status changed: degraded → down"
+    # duplicate row is gone (status flap damping spec, section 2).
+    transitions = [
+        e for e in ping_events
+        if e["previous_status"] == "degraded" and e["new_status"] == "down"
+    ]
+    assert len(transitions) == 1
+    assert transitions[0]["description"].startswith("Status changed degraded → down. ")
+    assert "timeout" in transitions[0]["description"]
+    assert "Status changed: degraded → down" not in descriptions
+    assert len(ping_events) == 1
 
     env.send_degraded_alert.assert_not_called()
     env.send_alert.assert_called_once()

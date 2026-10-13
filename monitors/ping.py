@@ -14,6 +14,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
+from monitors import gateway
 from monitors.base import MonitorResult, Status
 
 
@@ -71,43 +72,99 @@ def _ping_sync(target: str, count: int) -> tuple[Optional[float], float]:
         return None, 100.0
 
 
+def _fmt_pct(value: float) -> str:
+    return f"{int(value)}%" if value == int(value) else f"{value:.1f}%"
+
+
+def _fault_location(
+    gateway: Optional[tuple[str, Status, float]],
+    internet_statuses: list[Status],
+    target_loss_pct: float,
+) -> str:
+    """One-line hint at *where* a fault sits, for a non-ok internet-target row.
+
+    ``gateway`` is ``(address, status, loss_pct)`` for the LAN gateway leg, or
+    None when that leg is off. ``target_loss_pct`` is the row's own target loss,
+    used for the short message when there is no gateway leg.
+    """
+    if gateway is None:
+        return f"{_fmt_pct(target_loss_pct)} loss"
+    addr, gw_status, gw_loss = gateway
+    if gw_status != "ok":
+        return f"LAN gateway {addr} {_fmt_pct(gw_loss)} loss — fault is on the local network or router"
+    if any(s != "ok" for s in internet_statuses):
+        return f"LAN gateway {addr} ok ({_fmt_pct(gw_loss)} loss) — fault is beyond your router (modem/ISP)"
+    return ""
+
+
+def _rows(target: str, ts: str, latency_ms: Optional[float], loss_pct: float,
+          status: Status, message: str = "") -> list[MonitorResult]:
+    results: list[MonitorResult] = []
+    if latency_ms is not None:
+        results.append(
+            MonitorResult(
+                monitor="ping",
+                target=target,
+                timestamp=ts,
+                metric="latency_ms",
+                value=round(latency_ms, 2),
+                status=status,
+                message=message,
+            )
+        )
+    results.append(
+        MonitorResult(
+            monitor="ping",
+            target=target,
+            timestamp=ts,
+            metric="packet_loss_pct",
+            value=loss_pct,
+            status=status,
+            message=message,
+        )
+    )
+    return results
+
+
 async def run(config: dict) -> list[MonitorResult]:
     cfg = config.get("monitors", {}).get("ping", {})
     targets = cfg.get("targets", ["1.1.1.1", "wikipedia.org", "kernel.org"])
     count = cfg.get("count", 5)
     thresholds = cfg.get("thresholds", {})
 
+    # LAN gateway leg: auto-detected once (Linux), explicit, or off. Resolved
+    # through the module attribute so tests can stub it.
+    gateway_addr = await gateway.resolve(config)
+
     loop = asyncio.get_running_loop()
 
-    async def _check(target: str) -> list[MonitorResult]:
+    async def _measure(target: str) -> tuple[str, Optional[float], float, Status, str]:
         latency_ms, loss_pct = await loop.run_in_executor(
             None, _ping_sync, target, count
         )
         ts = datetime.now(timezone.utc).isoformat()
-        status = _determine_status(latency_ms, loss_pct, thresholds)
-        results: list[MonitorResult] = []
-        if latency_ms is not None:
-            results.append(
-                MonitorResult(
-                    monitor="ping",
-                    target=target,
-                    timestamp=ts,
-                    metric="latency_ms",
-                    value=round(latency_ms, 2),
-                    status=status,
-                )
-            )
-        results.append(
-            MonitorResult(
-                monitor="ping",
-                target=target,
-                timestamp=ts,
-                metric="packet_loss_pct",
-                value=loss_pct,
-                status=status,
-            )
-        )
-        return results
+        return target, latency_ms, loss_pct, _determine_status(latency_ms, loss_pct, thresholds), ts
 
-    nested = await asyncio.gather(*[_check(t) for t in targets])
-    return [r for sublist in nested for r in sublist]
+    # The gateway rides in the same gather as the internet targets, so it
+    # adds no wall-clock to the poll.
+    probes = list(targets) + ([gateway_addr] if gateway_addr else [])
+    measured = await asyncio.gather(*[_measure(t) for t in probes])
+
+    internet = measured[: len(targets)]
+    gw_reading = None
+    results: list[MonitorResult] = []
+    if gateway_addr:
+        _addr, gw_latency, gw_loss, gw_status, gw_ts = measured[-1]
+        gw_reading = (gateway_addr, gw_status, gw_loss)
+
+    internet_statuses = [m[3] for m in internet]
+    for target, latency_ms, loss_pct, status, ts in internet:
+        message = (
+            _fault_location(gw_reading, internet_statuses, loss_pct) if status != "ok" else ""
+        )
+        results.extend(_rows(target, ts, latency_ms, loss_pct, status, message))
+
+    if gateway_addr:
+        results.extend(_rows(f"gateway {gateway_addr}", gw_ts, gw_latency, gw_loss, gw_status))
+
+    return results
