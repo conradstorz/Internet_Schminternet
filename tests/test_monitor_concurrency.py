@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import monitors.dns as dns_monitor
 import monitors.ping as ping_monitor
 
 
 def _ping_cfg(targets: list[str]) -> dict:
-    return {"monitors": {"ping": {"targets": targets, "count": 1, "thresholds": {}}}}
+    # gateway: None — never auto-detect (which would shell out) in these tests.
+    return {"monitors": {"ping": {"targets": targets, "count": 1, "thresholds": {}, "gateway": None}}}
 
 
 def _dns_cfg(servers: list[str]) -> dict:
@@ -53,6 +54,26 @@ async def test_ping_targets_run_concurrently():
 
     assert elapsed < 0.18, (
         f"Ping targets appear to run sequentially (took {elapsed:.3f}s — expected ~0.1s)"
+    )
+
+
+async def test_ping_gateway_leg_runs_in_same_gather():
+    """The LAN gateway ping adds no wall-clock: three 0.1 s pings take ~0.1 s."""
+
+    def slow_ping(target: str, count: int):
+        time.sleep(0.1)
+        return (10.0, 0.0)
+
+    with patch("monitors.gateway.resolve", AsyncMock(return_value="192.168.86.1")), \
+         patch("monitors.ping._ping_sync", side_effect=slow_ping) as fake:
+        start = time.perf_counter()
+        results = await ping_monitor.run(_ping_cfg(["8.8.8.8", "1.1.1.1"]))
+        elapsed = time.perf_counter() - start
+
+    assert fake.call_count == 3
+    assert "gateway 192.168.86.1" in {r.target for r in results}
+    assert elapsed < 0.18, (
+        f"Gateway ping appears to run sequentially (took {elapsed:.3f}s — expected ~0.1s)"
     )
 
 

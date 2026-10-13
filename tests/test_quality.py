@@ -102,6 +102,23 @@ class TestScorePing:
         ]
         assert score_monitor("ping", results, PING_CFG) == pytest.approx(0.6, abs=0.01)
 
+    def test_gateway_targets_excluded(self):
+        # A perfect 0.4 ms LAN hop must not dilute the internet targets' score.
+        results = [
+            _result("ping", "gateway 192.168.86.1", "latency_ms", 0.0),
+            _result("ping", "gateway 192.168.86.1", "packet_loss_pct", 0.0),
+            _result("ping", "1.1.1.1", "latency_ms", 100.0),
+            _result("ping", "1.1.1.1", "packet_loss_pct", 0.0),
+        ]
+        assert score_monitor("ping", results, PING_CFG) == pytest.approx(0.6, abs=0.01)
+
+    def test_only_gateway_target_scores_zero(self):
+        results = [
+            _result("ping", "gateway 192.168.86.1", "latency_ms", 0.4),
+            _result("ping", "gateway 192.168.86.1", "packet_loss_pct", 0.0),
+        ]
+        assert score_monitor("ping", results, PING_CFG) == 0.0
+
 
 # ---------------------------------------------------------------------------
 # dns

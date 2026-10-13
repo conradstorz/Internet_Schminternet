@@ -21,6 +21,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "loss_degraded_pct": 10,
                 "loss_down_pct": 50,
             },
+            # LAN gateway leg: "auto" (TTL-walk detection, Linux only, once
+            # per process), an explicit address, or None/False to disable.
+            # Pinged alongside the targets as "gateway <addr>" so a non-ok
+            # internet row can say whether the fault is inside or beyond the
+            # router. See monitors/gateway.py.
+            "gateway": "auto",
+            # Background mtr (traceroute fallback) on ping episode onset
+            # (ok/unknown -> degraded/down), recorded as a path_trace event.
+            # target None = the first ping target. Cooldown runs from the last
+            # trace start. See monitors/path_trace.py.
+            "trace": {
+                "enabled": True,
+                "target": None,
+                "cycles": 10,
+                "cooldown_minutes": 15,
+            },
         },
         "dns": {
             "servers": ["8.8.8.8", "9.9.9.9"],
